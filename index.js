@@ -91,7 +91,8 @@ function deepSeekSystemInstruction() {
     "purchase_date debe ser YYYY-MM-DD.",
     "Si el usuario escribe 'Amex', es ambiguo: debe ser 'American Express' o 'Amex Aeromexico' → error pidiendo aclaración.",
     "merchant debe ser un nombre corto y limpio (ej. 'Uber', 'Chedraui', 'Amazon').",
-    "description debe ser corta y útil."
+    "description debe ser corta y útil.",
+    "Reglas de fecha: si el texto contiene 'hoy' usa Hoy; si contiene 'ayer' usa Hoy - 1 día; si contiene 'antier' o 'anteayer' usa Hoy - 2 días. Esto es obligatorio."
   ].join(" ");
 }
 
@@ -285,11 +286,15 @@ app.post("/telegram-webhook", async (req, res) => {
       draft = v.draft;
       draft.raw_text = text;
 
+      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+
     } catch (e) {
       console.error("DeepSeek parse failed, fallback naive:", e);
 
       draft = naiveParse(text);
       draft.raw_text = text;
+
+      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
 
       const err = validateDraft(draft);
       if (err) {
@@ -305,6 +310,28 @@ app.post("/telegram-webhook", async (req, res) => {
     console.error(e);
   }
 });
+
+function minusDaysISO(todayISO, days) {
+  const d = new Date(todayISO + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function overrideRelativeDate(text, currentISO) {
+  const t = (text || "").toLowerCase();
+
+  // si el usuario pone una fecha explícita YYYY-MM-DD, respétala
+  const explicit = (text.match(/\b\d{4}-\d{2}-\d{2}\b/) || [])[0];
+  if (explicit) return explicit;
+
+  const todayISO = new Date().toISOString().slice(0, 10);
+
+  if (/\bantier\b|\banteayer\b/.test(t)) return minusDaysISO(todayISO, 2);
+  if (/\bayer\b/.test(t)) return minusDaysISO(todayISO, 1);
+  if (/\bhoy\b/.test(t)) return todayISO;
+
+  return currentISO; // deja lo que venía
+}
 
 // ===== Naive parsing fallback =====
 function naiveParse(text) {
