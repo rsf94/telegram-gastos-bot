@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "main": "index.js",
   "type": "module",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "express": "^4.19.2",
-    "googleapis": "^140.0.0"
+    "@google-cloud/bigquery": "^7.9.0"
   }
 }
