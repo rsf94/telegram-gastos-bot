@@ -1,5 +1,6 @@
 import express from "express";
-import { BigQuery } from "@google-cloud/bigquery";
+import bigqueryPkg from "@google-cloud/bigquery";
+const { BigQuery } = bigqueryPkg;
 import crypto from "crypto";
 
 const app = express();
