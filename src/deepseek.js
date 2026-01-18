@@ -22,6 +22,7 @@ function deepSeekSystemInstruction() {
     "- msi_months = el número de meses (ej: 6)",
     "- msi_total_amount = el monto TOTAL de la compra (el monto que aparece en el texto)",
     "- amount_mxn = monto mensual aproximado = msi_total_amount / msi_months (redondea a 2 decimales).",
+    "Si detectas MSI y tienes meses, pide confirmación antes de registrar: devuelve error preguntando: ¿Confirmas MSI a N meses?",
     "Si detectas MSI pero no viene el número de meses, devuelve error preguntando: ¿a cuántos meses?",
     "",
     "Reglas de fecha: si el texto contiene 'hoy' usa Hoy; si contiene 'ayer' usa Hoy - 1 día; si contiene 'antier' o 'anteayer' usa Hoy - 2 días. Esto es obligatorio."
@@ -37,9 +38,8 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
     "Texto del usuario:",
     text,
     "",
-    "Devuelve SOLO JSON con una de estas dos formas:",
-    "Si detectas MSI pero no hay número de meses, devuelve error preguntando: ¿a cuántos meses?",
-    "1) Éxito:",
+    "Devuelve SOLO JSON con una de estas formas:",
+    "1) Éxito (sin MSI):",
     JSON.stringify({
       amount_mxn: 230,
       payment_method: "Banorte Platino",
@@ -52,7 +52,7 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
       msi_total_amount: null
     }),
     "",
-    "Ejemplo MSI (cashflow mensual):",
+    "2) Éxito (con MSI, cashflow mensual) [solo si ya fue confirmado]:",
     JSON.stringify({
       amount_mxn: 533.17,
       payment_method: "BBVA Platino",
@@ -65,7 +65,17 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
       msi_total_amount: 3199
     }),
     "",
-    "2) Error (si falta info o hay duda):",
+    "3) Error por MSI con meses (pedir confirmación):",
+    JSON.stringify({
+      error: "Detecté MSI a 6 meses. ¿Confirmas?"
+    }),
+    "",
+    "4) Error por MSI sin meses (debe pedir aclaración):",
+    JSON.stringify({
+      error: "Detecté MSI pero falta el número de meses. ¿A cuántos meses?"
+    }),
+    "",
+    "5) Error (si falta info o hay duda):",
     JSON.stringify({
       error: "Explica qué falta o qué es ambiguo y qué debe aclarar el usuario."
     }),
@@ -173,7 +183,7 @@ export async function validateParsedFromAI(obj) {
   // MSI validation + normalization (por si el modelo no dividió bien)
   if (d.is_msi) {
     if (!isFinite(d.msi_months) || d.msi_months <= 1) {
-      return { ok: false, error: "MSI detectado pero faltan meses. Ej: '100 gasolina 6MSI BBVA Platino'." };
+      return { ok: false, error: "Detecté MSI pero falta el número de meses. ¿A cuántos meses?" };
     }
     if (!isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
       // si no vino, asumimos que el monto del texto es el total
