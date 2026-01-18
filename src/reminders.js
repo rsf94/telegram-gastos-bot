@@ -1,5 +1,10 @@
 import { tgSend, escapeHtml } from "./telegram.js";
-import { getActiveCardRules, sumExpensesForCycle } from "./storage/bigquery.js";
+import {
+  getActiveCardRules,
+  sumExpensesForCycle,
+  alreadySentReminder,
+  logReminderSent
+} from "./storage/bigquery.js";
 import { todayISOInTZ } from "./parsing.js";
 
 // --- Date helpers (robustos contra TZ/DST) ---
@@ -44,7 +49,6 @@ function prevYM(y, m) {
   if (m === 0) return { y: y - 1, m: 12 };
   return { y, m };
 }
-
 function cutISOForYM(y, m, cut_day) {
   const cd = clampDay(y, m, cut_day);
   return makeISODate(y, m, cd);
@@ -68,6 +72,14 @@ export async function runDailyCardReminders() {
 
     // Solo disparamos si HOY es corte
     if (todayISO !== cutISO) continue;
+
+    // ✅ DEDUPE: si ya mandaste este recordatorio hoy para esta tarjeta, sáltalo
+    const already = await alreadySentReminder({
+      chatId: r.chat_id,
+      cardName: r.card_name,
+      cutISO
+    });
+    if (already) continue;
 
     // corte anterior = corte del mes pasado
     const { y: py, m: pm } = prevYM(y, m);
@@ -95,6 +107,13 @@ export async function runDailyCardReminders() {
     ].join("\n");
 
     await tgSend(r.chat_id, msg);
+
+    // ✅ registra que ya lo mandaste (para no spamear si cron corre 2+ veces)
+    await logReminderSent({
+      chatId: r.chat_id,
+      cardName: r.card_name,
+      cutISO
+    });
   }
 
   return { ok: true, todayISO, processed: rules.length };
