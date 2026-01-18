@@ -156,7 +156,7 @@ app.post("/telegram-webhook", async (req, res) => {
 
     try {
       const parsed = await callDeepSeekParse(text);
-      const v = validateParsedFromAI(parsed);
+      const v = await validateParsedFromAI(parsed);
 
       if (!v.ok) {
         await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
