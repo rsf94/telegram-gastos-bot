@@ -23,7 +23,7 @@ app.use(express.json({ limit: "1mb" }));
 const draftByChat = new Map(); // chatId -> draft
 
 /* =======================
- * Helpers (para flujo MSI "solo meses")
+ * Helpers
  * ======================= */
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -31,11 +31,24 @@ function round2(n) {
 function monthStartISO(yyyyMmDd) {
   return `${String(yyyyMmDd).slice(0, 7)}-01`;
 }
+function looksLikeMsiText(text) {
+  const t = String(text || "").toLowerCase();
+  // cubre: "msi", "a msi", "6msi", "6 msi", "meses sin intereses"
+  return /\bmsi\b/.test(t) || /\bmeses?\s+sin\s+intereses?\b/.test(t) || /\d+\s*msi\b/.test(t);
+}
+function parseJustMonths(text) {
+  // Acepta "6", "6 meses", "a 6", "6 msi"
+  const t = String(text || "").toLowerCase().trim();
+  const m = t.match(/(\d{1,2})/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 1 || n > 60) return null;
+  return n;
+}
 
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.post("/telegram-webhook", async (req, res) => {
-  // responde rápido a Telegram
   res.status(200).send("ok");
 
   try {
@@ -47,7 +60,6 @@ app.post("/telegram-webhook", async (req, res) => {
       const chatId = String(cb.message.chat.id);
       const data = cb.data;
 
-      // ❌ Cancelar
       if (data === "cancel") {
         draftByChat.delete(chatId);
         await tgSend(chatId, "🧹 <b>Cancelado</b>.");
@@ -55,7 +67,6 @@ app.post("/telegram-webhook", async (req, res) => {
         return;
       }
 
-      // ✅ Confirmar
       if (data === "confirm") {
         const draft = draftByChat.get(chatId);
         if (!draft) {
@@ -72,24 +83,18 @@ app.post("/telegram-webhook", async (req, res) => {
         return;
       }
 
-      // ✏️ Menú editar
       if (data === "edit_menu") {
-        await tgSend(chatId, "¿Qué quieres editar?", {
-          reply_markup: editMenuKeyboard()
-        });
+        await tgSend(chatId, "¿Qué quieres editar?", { reply_markup: editMenuKeyboard() });
         await answerCallbackQuery(cb.id);
         return;
       }
 
-      // ⬅️ Volver al preview
       if (data === "back_preview") {
         const draft = draftByChat.get(chatId);
         if (!draft) {
           await tgSend(chatId, "No tengo borrador activo.");
         } else {
-          await tgSend(chatId, preview(draft), {
-            reply_markup: mainKeyboard()
-          });
+          await tgSend(chatId, preview(draft), { reply_markup: mainKeyboard() });
         }
         await answerCallbackQuery(cb.id);
         return;
@@ -123,6 +128,10 @@ app.post("/telegram-webhook", async (req, res) => {
           "🧾 <b>Envíame un gasto</b>. Ej:",
           "<code>230 Uber American Express ayer</code>",
           "",
+          "🧾 <b>MSI</b>. Ej:",
+          "<code>gasolina 1200 BBVA Platino a MSI</code>",
+          "y luego respondes sólo: <code>6</code>",
+          "",
           "Luego confirma con botón ✅ o escribe <b>confirmar</b>.",
           "",
           "<b>Métodos válidos:</b>",
@@ -155,27 +164,100 @@ app.post("/telegram-webhook", async (req, res) => {
       return;
     }
 
-    // ===== MSI flow: si ya hay borrador MSI y estamos esperando meses =====
-    // (Esto evita que un "12" se vaya a DeepSeek y regrese "faltan datos".)
+    // =========================
+    // FLUJO A: "Esperando meses" (MSI step 2)
+    // =========================
     const existing = draftByChat.get(chatId);
-    if (existing?.is_msi === true && (!existing.msi_months || Number(existing.msi_months) <= 1)) {
-      const n = Number(String(text).trim());
-
-      if (!Number.isFinite(n) || n <= 1 || n > 60) {
-        await tgSend(chatId, "Dime solo el número de meses (ej: <code>6</code> o <code>12</code>).");
+    if (existing?.__state === "awaiting_msi_months") {
+      const n = parseJustMonths(text);
+      if (!n) {
+        await tgSend(chatId, "Dime solo el número de meses (ej: <code>6</code>, <code>12</code>).");
         return;
       }
 
+      existing.is_msi = true;
       existing.msi_months = n;
+
+      // Si no existe total, usa lo que haya en amount_mxn como total (por seguridad)
+      if (!existing.msi_total_amount || Number(existing.msi_total_amount) <= 0) {
+        existing.msi_total_amount = Number(existing.msi_total_amount || existing.amount_mxn);
+      }
+
+      // start_month default al mes de compra
       existing.msi_start_month = existing.msi_start_month || monthStartISO(existing.purchase_date);
+
+      // amount_mxn = mensual (cashflow)
       existing.amount_mxn = round2(Number(existing.msi_total_amount) / n);
+
+      // ya no estamos esperando
+      delete existing.__state;
 
       draftByChat.set(chatId, existing);
       await tgSend(chatId, preview(existing), { reply_markup: mainKeyboard() });
       return;
     }
 
-    // si no hay números, solo mensaje de ayuda
+    // =========================
+    // Detecta si es MSI (FLUJO B) o normal (FLUJO C)
+    // =========================
+    const wantsMsi = looksLikeMsiText(text);
+
+    // =========================
+    // FLUJO B: MSI (step 1)
+    // - parsea todo lo que se pueda del gasto,
+    // - guarda draft incompleto,
+    // - pregunta meses.
+    // =========================
+    if (wantsMsi) {
+      let draft;
+
+      // 1) intentar IA
+      try {
+        const parsed = await callDeepSeekParse(text);
+        const v = await validateParsedFromAI(parsed);
+
+        if (v.ok) {
+          draft = v.draft;
+        } else {
+          // si falla validación, caemos a naive para al menos sacar monto/tarjeta/merchant
+          draft = null;
+        }
+      } catch (e) {
+        draft = null;
+      }
+
+      // 2) fallback naive si no hay draft usable
+      if (!draft) {
+        draft = naiveParse(text);
+        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+        const err = validateDraft(draft);
+        if (err) {
+          await tgSend(chatId, err);
+          return;
+        }
+      }
+
+      // 3) fija MSI incompleto
+      draft.raw_text = text;
+      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+
+      // En MSI: interpretamos el monto del texto como TOTAL (msi_total_amount)
+      draft.is_msi = true;
+      draft.msi_total_amount = Number(draft.msi_total_amount || draft.amount_mxn);
+      draft.msi_months = null;
+      draft.msi_start_month = monthStartISO(draft.purchase_date);
+
+      // estado: esperando meses
+      draft.__state = "awaiting_msi_months";
+
+      draftByChat.set(chatId, draft);
+      await tgSend(chatId, "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (responde solo el número, ej: <code>6</code>)");
+      return;
+    }
+
+    // =========================
+    // FLUJO C: normal (sin MSI)
+    // =========================
     if (!/\d/.test(text)) {
       await tgSend(
         chatId,
@@ -184,20 +266,12 @@ app.post("/telegram-webhook", async (req, res) => {
       return;
     }
 
-    // Parse IA + fallback
     let draft;
-
     try {
       const parsed = await callDeepSeekParse(text);
       const v = await validateParsedFromAI(parsed);
 
       if (!v.ok) {
-        if (v.needs_msi_months && v.draft) {
-          draftByChat.set(chatId, { ...v.draft, raw_text: text });
-          await tgSend(chatId, "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (ej: <code>6</code>)");
-          return;
-        }
-
         await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
         return;
       }
@@ -218,6 +292,12 @@ app.post("/telegram-webhook", async (req, res) => {
         return;
       }
     }
+
+    // asegúrate que NO sea MSI
+    draft.is_msi = false;
+    draft.msi_months = null;
+    draft.msi_total_amount = null;
+    draft.msi_start_month = null;
 
     draftByChat.set(chatId, draft);
     await tgSend(chatId, preview(draft), { reply_markup: mainKeyboard() });
