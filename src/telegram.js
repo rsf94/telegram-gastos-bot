@@ -1,5 +1,8 @@
 import { TELEGRAM_BOT_TOKEN } from "./config.js";
 
+/* =======================
+ * Helpers
+ * ======================= */
 export function escapeHtml(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -7,6 +10,9 @@ export function escapeHtml(s) {
     .replaceAll(">", "&gt;");
 }
 
+/* =======================
+ * Telegram send helpers
+ * ======================= */
 export async function tgSend(chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   const payload = {
@@ -37,11 +43,37 @@ export async function answerCallbackQuery(callbackQueryId) {
   });
 }
 
-export function confirmKeyboard() {
+/* =======================
+ * Keyboards
+ * ======================= */
+
+/**
+ * Teclado principal debajo del preview
+ * ✏️ Editar
+ * ✅ Confirmar | ❌ Cancelar
+ */
+export function mainKeyboard() {
   return {
-    inline_keyboard: [[
-      { text: "✅ Confirmar", callback_data: "confirm" },
-      { text: "❌ Cancelar", callback_data: "cancel" }
-    ]]
+    inline_keyboard: [
+      [{ text: "✏️ Editar", callback_data: "edit_menu" }],
+      [
+        { text: "✅ Confirmar", callback_data: "confirm" },
+        { text: "❌ Cancelar", callback_data: "cancel" }
+      ]
+    ]
+  };
+}
+
+/**
+ * Menú de edición
+ */
+export function editMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📅 Cambiar fecha", callback_data: "edit_date" }],
+      [{ text: "🏷 Cambiar categoría", callback_data: "edit_category" }],
+      [{ text: "💳 Cambiar método", callback_data: "edit_payment" }],
+      [{ text: "⬅️ Volver", callback_data: "back_preview" }]
+    ]
   };
 }
