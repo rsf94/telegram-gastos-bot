@@ -44,18 +44,44 @@ const ALLOWED_CATEGORIES = [
   "Subscriptions","Savings"
 ];
 
+// ===== Helpers: HTML escaping (para parse_mode HTML) =====
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 // ===== Telegram =====
-async function tgSend(chatId, text) {
+async function tgSend(chatId, text, extra = {}) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const payload = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    ...extra
+  };
+
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text })
+    body: JSON.stringify(payload)
   });
+
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Telegram sendMessage failed ${res.status}: ${body}`);
   }
+}
+
+async function answerCallbackQuery(callbackQueryId) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`;
+  // No es crítico validar respuesta aquí; con que no truene basta.
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackQueryId })
+  });
 }
 
 // ===== BigQuery insert =====
@@ -200,117 +226,7 @@ function validateParsedFromAI(obj) {
   return { ok: true, draft: d };
 }
 
-// ===== Draft store (MVP) =====
-const draftByChat = new Map(); // chatId -> draft
-
-// ===== Health =====
-app.get("/", (req, res) => res.status(200).send("OK"));
-
-// ===== Webhook =====
-app.post("/telegram-webhook", async (req, res) => {
-  // Responde 200 rápido para que Telegram no reintente
-  res.status(200).send("ok");
-
-  try {
-    const update = req.body;
-    const msg = update.message || update.edited_message;
-    if (!msg?.chat?.id) return;
-
-    const chatId = String(msg.chat.id);
-    const text = (msg.text || "").trim();
-
-    if (!text) {
-      await tgSend(chatId, '✅ conectado. Mándame un gasto como: 230 Uber American Express ayer\n(Escribe "ayuda" para ejemplos)');
-      return;
-    }
-
-    const low = text.toLowerCase();
-
-    // Help
-    if (low === "ayuda" || low === "/help") {
-      await tgSend(chatId, [
-        "🧾 Envíame un gasto en texto. Ej:",
-        "230 Uber American Express ayer",
-        "",
-        "Luego responde:",
-        "- confirmar",
-        "- cancelar",
-        "",
-        "Métodos válidos:",
-        ALLOWED_PAYMENT_METHODS.map(x => `- ${x}`).join("\n"),
-        "",
-        "Nota: 'Amex' a secas es ambiguo."
-      ].join("\n"));
-      return;
-    }
-
-    // Cancel
-    if (low === "cancelar" || low === "/cancel") {
-      draftByChat.delete(chatId);
-      await tgSend(chatId, "🧹 Cancelado.");
-      return;
-    }
-
-    // Confirm -> insert BigQuery
-    if (low === "confirmar" || low === "/confirm") {
-      const draft = draftByChat.get(chatId);
-      if (!draft) {
-        await tgSend(chatId, "No tengo borrador. Mándame un gasto primero.");
-        return;
-      }
-
-      const expenseId = await insertExpenseToBQ(draft, chatId);
-      draftByChat.delete(chatId);
-      await tgSend(chatId, `✅ Guardado en BigQuery. ID: ${expenseId}`);
-      return;
-    }
-
-    // If no number, treat as ping
-    if (!/\d/.test(text)) {
-      await tgSend(chatId, '✅ conectado. Mándame un gasto como: 230 Uber American Express ayer\n(Escribe "ayuda" para ejemplos)');
-      return;
-    }
-
-    // ===== Parse: DeepSeek with fallback to naive =====
-    let draft;
-
-    try {
-      const parsed = await callDeepSeekParse(text);
-      const v = validateParsedFromAI(parsed);
-
-      if (!v.ok) {
-        await tgSend(chatId, `❌ ${v.error}`);
-        return;
-      }
-
-      draft = v.draft;
-      draft.raw_text = text;
-
-      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-
-    } catch (e) {
-      console.error("DeepSeek parse failed, fallback naive:", e);
-
-      draft = naiveParse(text);
-      draft.raw_text = text;
-
-      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-
-      const err = validateDraft(draft);
-      if (err) {
-        await tgSend(chatId, err);
-        return;
-      }
-    }
-
-    draftByChat.set(chatId, draft);
-    await tgSend(chatId, preview(draft));
-
-  } catch (e) {
-    console.error(e);
-  }
-});
-
+// ===== Relative date override (determinístico) =====
 function minusDaysISO(todayISO, days) {
   const d = new Date(todayISO + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() - days);
@@ -320,7 +236,6 @@ function minusDaysISO(todayISO, days) {
 function overrideRelativeDate(text, currentISO) {
   const t = (text || "").toLowerCase();
 
-  // si el usuario pone una fecha explícita YYYY-MM-DD, respétala
   const explicit = (text.match(/\b\d{4}-\d{2}-\d{2}\b/) || [])[0];
   if (explicit) return explicit;
 
@@ -330,7 +245,7 @@ function overrideRelativeDate(text, currentISO) {
   if (/\bayer\b/.test(t)) return minusDaysISO(todayISO, 1);
   if (/\bhoy\b/.test(t)) return todayISO;
 
-  return currentISO; // deja lo que venía
+  return currentISO;
 }
 
 // ===== Naive parsing fallback =====
@@ -377,19 +292,161 @@ function validateDraft(d) {
   return null;
 }
 
+// ===== Preview + botones =====
 function preview(d) {
-  return [
-    "🧾 Confirmar gasto",
-    `Monto: $${Math.round(d.amount_mxn)} MXN`,
-    `Método: ${d.payment_method}`,
-    `Fecha: ${d.purchase_date}`,
-    `Categoría: ${d.category}`,
-    `Descripción: ${d.description}`,
-    d.merchant ? `Comercio: ${d.merchant}` : null,
-    "",
-    "Responde: confirmar / cancelar"
-  ].filter(Boolean).join("\n");
+  const lines = [
+    "🧾 <b>Confirmar gasto</b>",
+    `Monto: <b>$${Math.round(d.amount_mxn)} MXN</b>`,
+    `Método: <b>${escapeHtml(d.payment_method)}</b>`,
+    `Fecha: <b>${escapeHtml(d.purchase_date)}</b>`,
+    `Categoría: <b>${escapeHtml(d.category)}</b>`,
+    `Descripción: ${escapeHtml(d.description)}`
+  ];
+  if (d.merchant) lines.push(`Comercio: ${escapeHtml(d.merchant)}`);
+  lines.push("", "Toca un botón:");
+  return lines.join("\n");
 }
+
+function confirmKeyboard() {
+  return {
+    inline_keyboard: [[
+      { text: "✅ Confirmar", callback_data: "confirm" },
+      { text: "❌ Cancelar", callback_data: "cancel" }
+    ]]
+  };
+}
+
+// ===== Draft store (MVP) =====
+const draftByChat = new Map(); // chatId -> draft
+
+// ===== Health =====
+app.get("/", (req, res) => res.status(200).send("OK"));
+
+// ===== Webhook =====
+app.post("/telegram-webhook", async (req, res) => {
+  res.status(200).send("ok");
+
+  try {
+    const update = req.body;
+
+    // ---- 1) BOTONES (callback_query) ----
+    const cb = update.callback_query;
+    if (cb?.message?.chat?.id) {
+      const chatId = String(cb.message.chat.id);
+      const data = cb.data;
+
+      if (data === "cancel") {
+        draftByChat.delete(chatId);
+        await tgSend(chatId, "🧹 <b>Cancelado</b>.");
+      } else if (data === "confirm") {
+        const draft = draftByChat.get(chatId);
+        if (!draft) {
+          await tgSend(chatId, "No tengo borrador. Mándame un gasto primero.");
+        } else {
+          const expenseId = await insertExpenseToBQ(draft, chatId);
+          draftByChat.delete(chatId);
+          await tgSend(chatId, `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`);
+        }
+      }
+
+      await answerCallbackQuery(cb.id); // quita el “loading…”
+      return;
+    }
+
+    // ---- 2) MENSAJES NORMAL (message) ----
+    const msg = update.message || update.edited_message;
+    if (!msg?.chat?.id) return;
+
+    const chatId = String(msg.chat.id);
+    const text = (msg.text || "").trim();
+
+    if (!text) {
+      await tgSend(chatId, '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)');
+      return;
+    }
+
+    const low = text.toLowerCase();
+
+    // Help
+    if (low === "ayuda" || low === "/help") {
+      await tgSend(chatId, [
+        "🧾 <b>Envíame un gasto</b>. Ej:",
+        "<code>230 Uber American Express ayer</code>",
+        "",
+        "Luego confirma con botón ✅ o escribe <b>confirmar</b>.",
+        "",
+        "<b>Métodos válidos:</b>",
+        ALLOWED_PAYMENT_METHODS.map(x => `- ${escapeHtml(x)}`).join("\n"),
+        "",
+        "Nota: <b>'Amex'</b> a secas es ambiguo."
+      ].join("\n"));
+      return;
+    }
+
+    // Cancel (texto)
+    if (low === "cancelar" || low === "/cancel") {
+      draftByChat.delete(chatId);
+      await tgSend(chatId, "🧹 <b>Cancelado</b>.");
+      return;
+    }
+
+    // Confirm (texto)
+    if (low === "confirmar" || low === "/confirm") {
+      const draft = draftByChat.get(chatId);
+      if (!draft) {
+        await tgSend(chatId, "No tengo borrador. Mándame un gasto primero.");
+        return;
+      }
+      const expenseId = await insertExpenseToBQ(draft, chatId);
+      draftByChat.delete(chatId);
+      await tgSend(chatId, `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`);
+      return;
+    }
+
+    // Ping si no hay números
+    if (!/\d/.test(text)) {
+      await tgSend(chatId, '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)');
+      return;
+    }
+
+    // ===== Parse: DeepSeek with fallback to naive =====
+    let draft;
+
+    try {
+      const parsed = await callDeepSeekParse(text);
+      const v = validateParsedFromAI(parsed);
+
+      if (!v.ok) {
+        await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
+        return;
+      }
+
+      draft = v.draft;
+      draft.raw_text = text;
+      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+
+    } catch (e) {
+      console.error("DeepSeek parse failed, fallback naive:", e);
+
+      draft = naiveParse(text);
+      draft.raw_text = text;
+      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+
+      const err = validateDraft(draft);
+      if (err) {
+        await tgSend(chatId, err);
+        return;
+      }
+    }
+
+    // Guarda borrador y manda preview con botones
+    draftByChat.set(chatId, draft);
+    await tgSend(chatId, preview(draft), { reply_markup: confirmKeyboard() });
+
+  } catch (e) {
+    console.error(e);
+  }
+});
 
 // ===== Start =====
 const PORT = process.env.PORT || 8080;
