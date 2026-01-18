@@ -44,7 +44,7 @@ function deepSeekSystemInstruction() {
     "Si el texto contiene 'msi' o 'meses sin intereses' (ej: '6MSI', '6 MSI', 'a 6 msi'):",
     "- is_msi = true",
     "- msi_months = número de meses (ej: 6)",
-    "- msi_total_amount = monto TOTAL de la compra",
+    "- msi_total_amount = monto TOTAL de la compra (el monto del texto)",
     "- amount_mxn = monto mensual = msi_total_amount / msi_months (redondea a 2 decimales)",
     "Si detectas MSI pero no viene el número de meses, devuelve error preguntando: ¿a cuántos meses?",
     "",
@@ -110,9 +110,7 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
  * Llamada a DeepSeek
  * ======================= */
 export async function callDeepSeekParse(text) {
-  if (!DEEPSEEK_API_KEY) {
-    throw new Error("Missing env var: DEEPSEEK_API_KEY");
-  }
+  if (!DEEPSEEK_API_KEY) throw new Error("Missing env var: DEEPSEEK_API_KEY");
 
   const today = todayISOInTZ();
   const allowedPaymentMethods = await getAllowedPaymentMethods();
@@ -136,9 +134,7 @@ export async function callDeepSeekParse(text) {
   });
 
   const bodyText = await res.text();
-  if (!res.ok) {
-    throw new Error(`DeepSeek HTTP ${res.status}: ${bodyText}`);
-  }
+  if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}: ${bodyText}`);
 
   const data = JSON.parse(bodyText);
   const out = data?.choices?.[0]?.message?.content || "";
@@ -152,6 +148,7 @@ export async function validateParsedFromAI(obj) {
   if (obj?.error) return { ok: false, error: String(obj.error) };
 
   const allowedPaymentMethods = await getAllowedPaymentMethods();
+
   const isMsi = obj.is_msi === true;
   const originalAmount = Number(obj.amount_mxn);
 
@@ -169,87 +166,63 @@ export async function validateParsedFromAI(obj) {
     msi_start_month: isMsi ? String(obj.msi_start_month || "") : null
   };
 
-if (d.is_msi) {
-  // total amount siempre debe existir
-  if (!isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
-    d.msi_total_amount = originalAmount; // el monto que escribió el user
+  // básicos
+  if (!isFinite(d.amount_mxn) || d.amount_mxn <= 0) {
+    return { ok: false, error: "Monto inválido. Ej: 230 Uber BBVA Platino ayer" };
   }
-
-  // si no viene meses, NO error genérico: devuelve un "needs_months"
-  if (!isFinite(d.msi_months) || d.msi_months <= 1) {
-    // default msi_start_month al mes de la compra
-    d.msi_start_month = monthStartISO(d.purchase_date);
-    return { ok: false, needs_msi_months: true, draft: d };
-  }
-
-  // si sí vienen meses, ya puedes normalizar
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.msi_start_month)) {
-    d.msi_start_month = monthStartISO(d.purchase_date);
-  }
-
-  // OJO: aquí aún NO dividas si quieres que el cashflow lo genere installments
-  // pero si vas a mantener amount_mxn como “mensual”, entonces sí:
-  d.amount_mxn = round2(d.msi_total_amount / d.msi_months);
-
-  return { ok: true, draft: d };
-}
 
   if (d.payment_method.toLowerCase() === "amex") {
-    return {
-      ok: false,
-      error: "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico."
-    };
+    return { ok: false, error: "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico." };
   }
 
   if (!allowedPaymentMethods.includes(d.payment_method)) {
     return {
       ok: false,
-      error:
-        "Método de pago inválido. Usa uno de:\n- " +
-        allowedPaymentMethods.join("\n- ")
+      error: "Método de pago inválido. Usa uno de:\n- " + allowedPaymentMethods.join("\n- ")
     };
   }
 
   if (!ALLOWED_CATEGORIES.includes(d.category)) {
     return {
       ok: false,
-      error:
-        "Categoría inválida. Debe ser una de tu lista (ej. Transport, Groceries, Restaurant)."
+      error: "Categoría inválida. Debe ser una de tu lista (ej. Transport, Groceries, Restaurant)."
     };
   }
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d.purchase_date)) {
-    return {
-      ok: false,
-      error: "Fecha inválida. Debe ser YYYY-MM-DD (ej. 2026-01-16)."
-    };
+    return { ok: false, error: "Fecha inválida. Debe ser YYYY-MM-DD (ej. 2026-01-16)." };
   }
 
   if (!d.description) d.description = "Gasto";
 
-  /* ===== MSI normalization ===== */
+  /* ===== MSI handling (modo conversacional) ===== */
   if (d.is_msi) {
-    if (!isFinite(d.msi_months) || d.msi_months <= 1) {
-      return {
-        ok: false,
-        error: "MSI detectado pero faltan meses. Ej: '100 gasolina 6MSI BBVA Platino'."
-      };
-    }
-
+    // total amount siempre debe existir: si no vino, usamos el monto del texto
     if (!isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
       d.msi_total_amount = originalAmount;
     }
 
+    // si NO vienen meses -> regresamos borrador parcial
+    if (!isFinite(d.msi_months) || d.msi_months <= 1) {
+      d.msi_months = null;
+      d.msi_start_month = monthStartISO(d.purchase_date);
+      // OJO: no tocamos amount_mxn aquí (sigue siendo el total)
+      return { ok: false, needs_msi_months: true, draft: d };
+    }
+
+    // si SÍ vienen meses -> normalizamos amount_mxn a cashflow mensual
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d.msi_start_month)) {
       d.msi_start_month = monthStartISO(d.purchase_date);
     }
 
     d.amount_mxn = round2(d.msi_total_amount / d.msi_months);
-  } else {
-    d.msi_months = null;
-    d.msi_total_amount = null;
-    d.msi_start_month = null;
+    return { ok: true, draft: d };
   }
+
+  // NO MSI: limpia campos MSI por consistencia
+  d.msi_months = null;
+  d.msi_total_amount = null;
+  d.msi_start_month = null;
 
   return { ok: true, draft: d };
 }
