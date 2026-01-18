@@ -1,5 +1,10 @@
 import { tgSend, escapeHtml } from "./telegram.js";
-import { getActiveCardRules, sumExpensesForCycle, alreadySentReminder, logReminderSent } from "./storage/bigquery.js";
+import {
+  getActiveCardRules,
+  sumExpensesForCycle,
+  alreadySentReminder,
+  logReminderSent
+} from "./storage/bigquery.js";
 import { todayISOInTZ } from "./parsing.js";
 
 // --- Date helpers (robustos contra TZ/DST) ---
@@ -54,7 +59,8 @@ function formatMoneyMXN(n) {
   return x.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
 }
 
-export async function runDailyCardReminders() {
+// ✅ CAMBIO 1: acepta { force }
+export async function runDailyCardReminders({ force = false } = {}) {
   const todayISO = todayISOInTZ(); // CDMX
 
   const rules = await getActiveCardRules();
@@ -62,25 +68,23 @@ export async function runDailyCardReminders() {
   for (const r of rules) {
     const { y, m } = ymFromISO(todayISO);
 
-    // corte del mes actual (clamp a último día si el mes no tiene cut_day)
     const cutISO = cutISOForYM(y, m, r.cut_day);
 
-    // Solo disparamos si HOY es corte
     if (todayISO !== cutISO) continue;
 
-    // ✅ DEDUPE: si ya mandaste este recordatorio hoy para esta tarjeta, sáltalo
-    const already = await alreadySentReminder({
-      chatId: r.chat_id,
-      cardName: r.card_name,
-      cutISO
-    });
-    if (already) continue;
+    // ✅ CAMBIO 2: si force=true, no dedupe
+    if (!force) {
+      const already = await alreadySentReminder({
+        chatId: r.chat_id,
+        cardName: r.card_name,
+        cutISO
+      });
+      if (already) continue;
+    }
 
-    // corte anterior = corte del mes pasado
     const { y: py, m: pm } = prevYM(y, m);
     const prevCutISO = cutISOForYM(py, pm, r.cut_day);
 
-    // ciclo: (prevCut + 1) ... cut
     const startISO = addDaysISO(prevCutISO, 1);
     const endISO = cutISO;
 
@@ -103,7 +107,6 @@ export async function runDailyCardReminders() {
 
     await tgSend(r.chat_id, msg);
 
-    // ✅ registra que ya lo mandaste (para no spamear si cron corre 2+ veces)
     await logReminderSent({
       chatId: r.chat_id,
       cardName: r.card_name,
