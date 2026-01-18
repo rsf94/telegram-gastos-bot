@@ -17,14 +17,14 @@ function deepSeekSystemInstruction() {
     "merchant debe ser un nombre corto y limpio (ej. 'Uber', 'Chedraui', 'Amazon').",
     "description debe ser corta y útil.",
     "",
-    "=== MSI ===",
-    "Detecta MSI si el texto contiene 'msi' o 'meses' o 'a N meses' o 'N meses sin intereses'.",
-    "Si detectas MSI, incluye además:",
-    "- is_msi: true",
-    "- msi_months: N (entero > 1)",
-    "- msi_total_amount: total de la compra (NUMERIC). Si no se menciona otro total, usa amount_mxn como total.",
-    "Si hay MSI pero no puedes inferir N con certeza, devuelve error solicitando los meses.",
-    "Si no hay MSI, incluye is_msi:false y deja msi_* como null/omitidos.",
+    "=== MSI (Meses Sin Intereses) ===",
+    "Si el texto contiene 'msi' o 'meses sin intereses' (ej: '6MSI', '6 MSI', 'a 6 msi'), entonces:",
+    "- is_msi = true",
+    "- msi_months = el número de meses (ej: 6)",
+    "- msi_total_amount = el monto TOTAL de la compra (el monto que aparece en el texto)",
+    "- amount_mxn = monto mensual aproximado = msi_total_amount / msi_months (redondea a 2 decimales).",
+    "Si detectas MSI y tienes meses, pide confirmación antes de registrar: devuelve error preguntando: ¿Confirmas MSI a N meses?",
+    "Si detectas MSI pero no viene el número de meses, devuelve error preguntando: ¿a cuántos meses?",
     "",
     "=== Reglas de fecha ===",
     "Reglas de fecha: si el texto contiene 'hoy' usa Hoy; si contiene 'ayer' usa Hoy - 1 día; si contiene 'antier' o 'anteayer' usa Hoy - 2 días. Esto es obligatorio."
@@ -40,9 +40,8 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
     "Texto del usuario:",
     text,
     "",
-    "Devuelve SOLO JSON con una de estas dos formas:",
-    "",
-    "1) Éxito SIN MSI:",
+    "Devuelve SOLO JSON con una de estas formas:",
+    "1) Éxito (sin MSI):",
     JSON.stringify({
       amount_mxn: 230,
       payment_method: "Banorte Platino",
@@ -55,20 +54,30 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
       msi_total_amount: null
     }),
     "",
-    "2) Éxito CON MSI (ej: '13878 Palacio de Hierro American Express a 6 meses'):",
+    "2) Éxito (con MSI, cashflow mensual) [solo si ya fue confirmado]:",
     JSON.stringify({
-      amount_mxn: 13878,
-      payment_method: "American Express",
+      amount_mxn: 533.17,
+      payment_method: "BBVA Platino",
       category: "E-commerce",
-      purchase_date: "2026-01-18",
-      merchant: "Palacio de Hierro",
-      description: "Compra a MSI",
+      purchase_date: "2026-01-16",
+      merchant: "Amazon",
+      description: "Compra Amazon",
       is_msi: true,
       msi_months: 6,
-      msi_total_amount: 13878
+      msi_total_amount: 3199
     }),
     "",
-    "3) Error (si falta info o hay duda):",
+    "3) Error por MSI con meses (pedir confirmación):",
+    JSON.stringify({
+      error: "Detecté MSI a 6 meses. ¿Confirmas?"
+    }),
+    "",
+    "4) Error por MSI sin meses (debe pedir aclaración):",
+    JSON.stringify({
+      error: "Detecté MSI pero falta el número de meses. ¿A cuántos meses?"
+    }),
+    "",
+    "5) Error (si falta info o hay duda):",
     JSON.stringify({
       error: "Explica qué falta o qué es ambiguo y qué debe aclarar el usuario."
     }),
@@ -87,18 +96,8 @@ function extractJsonObject(text) {
   return JSON.parse(m[0]);
 }
 
-function parseMaybeInt(x) {
-  if (x === null || x === undefined || x === "") return null;
-  const n = Number(x);
-  if (!Number.isFinite(n)) return null;
-  return Math.trunc(n);
-}
-
-function parseMaybeNumber(x) {
-  if (x === null || x === undefined || x === "") return null;
-  const n = Number(x);
-  if (!Number.isFinite(n)) return null;
-  return n;
+function round2(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
 export async function callDeepSeekParse(text) {
@@ -137,6 +136,8 @@ export async function callDeepSeekParse(text) {
 export async function validateParsedFromAI(obj) {
   if (obj?.error) return { ok: false, error: String(obj.error) };
 
+  const allowedPaymentMethods = await getAllowedPaymentMethods();
+
   const isMsi = obj.is_msi === true;
 
   const d = {
@@ -147,8 +148,8 @@ export async function validateParsedFromAI(obj) {
     merchant: String(obj.merchant || ""),
     description: String(obj.description || ""),
     is_msi: isMsi,
-    msi_months: isMsi ? parseMaybeInt(obj.msi_months) : null,
-    msi_total_amount: isMsi ? parseMaybeNumber(obj.msi_total_amount ?? obj.amount_mxn) : null
+    msi_months: isMsi ? Number(obj.msi_months) : null,
+    msi_total_amount: isMsi ? Number(obj.msi_total_amount) : null
   };
 
   if (!isFinite(d.amount_mxn) || d.amount_mxn <= 0) {
@@ -159,7 +160,6 @@ export async function validateParsedFromAI(obj) {
     return { ok: false, error: "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico." };
   }
 
-  const allowedPaymentMethods = await getAllowedPaymentMethods();
   if (!allowedPaymentMethods.includes(d.payment_method)) {
     return {
       ok: false,
@@ -180,22 +180,21 @@ export async function validateParsedFromAI(obj) {
 
   if (!d.description) d.description = "Gasto";
 
-  // ✅ Validación MSI
+  // MSI validation + normalization (por si el modelo no dividió bien)
   if (d.is_msi) {
-    if (!d.msi_months || !Number.isFinite(d.msi_months) || d.msi_months < 2) {
-      return { ok: false, error: "MSI detectado, pero faltan los meses. Ej: '13878 Palacio American Express a 6 meses'." };
+    if (!isFinite(d.msi_months) || d.msi_months <= 1) {
+      return { ok: false, error: "Detecté MSI pero falta el número de meses. ¿A cuántos meses?" };
     }
-    if (d.msi_months > 60) {
-      return { ok: false, error: "MSI inválido: meses demasiado altos. Revisa el número de meses." };
+    if (!isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
+      // si no vino, asumimos que el monto del texto es el total
+      d.msi_total_amount = Number(obj.msi_total_amount || obj.amount_mxn || d.amount_mxn);
     }
-    if (!Number.isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
-      return { ok: false, error: "MSI inválido: msi_total_amount debe ser > 0." };
-    }
-
-    // Si el modelo puso amount_mxn distinto al total, forzamos consistencia:
-    // En tu diseño: amount_mxn representa el TOTAL de la compra (para MSI).
-    // (El flujo de cash lo calcula installments.)
-    d.amount_mxn = Number(d.msi_total_amount);
+    // Asegura cashflow mensual
+    const expectedMonthly = round2(d.msi_total_amount / d.msi_months);
+    d.amount_mxn = expectedMonthly;
+  } else {
+    d.msi_months = null;
+    d.msi_total_amount = null;
   }
 
   return { ok: true, draft: d };
