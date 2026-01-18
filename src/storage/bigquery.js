@@ -1,3 +1,4 @@
+// storage/bigquery.js
 import bigqueryPkg from "@google-cloud/bigquery";
 const { BigQuery } = bigqueryPkg;
 import crypto from "crypto";
@@ -12,10 +13,15 @@ const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
+
 function money2(n) {
   // BigQuery NUMERIC: mejor como string con 2 decimales
-  const x = round2(Number(n || 0));
-  return x.toFixed(2);
+  // IMPORTANTE: si n es null/undefined o NaN, truena para evitar guardar "0.00" por accidente
+  const x = Number(n);
+  if (!Number.isFinite(x)) {
+    throw new Error(`money2(): invalid number: ${n}`);
+  }
+  return round2(x).toFixed(2);
 }
 
 /* =======================
@@ -43,7 +49,7 @@ export async function insertExpenseToBQ(draft, chatId) {
     msi_months: isMsi ? Number(draft.msi_months || null) : null,
     msi_start_month: isMsi ? (draft.msi_start_month || null) : null,
     msi_total_amount: isMsi
-      ? money2(draft.msi_total_amount || draft.amount_mxn)
+      ? money2(draft.msi_total_amount ?? draft.amount_mxn)
       : null
   };
 
@@ -266,7 +272,7 @@ export async function createInstallmentsForExpense({
     billing_month: addMonthsYYYYMM01(billingMonthISO, i), // YYYY-MM-01
     installment_number: i + 1,
     months_total: Number(monthsTotal),
-    amount_mxn: money2(amt),
+    amount_mxn: money2(amt), // ✅ NUMERIC como string
     status: "SCHEDULED",
     created_at: nowISO
   }));
@@ -314,7 +320,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
   }
 
   const row = {
-    id: expenseId,
+    id: String(expenseId),
     created_at: new Date().toISOString(),
     purchase_date: draft.purchase_date,
     amount_mxn: isMsi ? money2(monthlyAmount) : money2(draft.amount_mxn),
@@ -328,7 +334,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
 
     is_msi: isMsi,
     msi_months: isMsi ? msiMonths : null,
-    msi_start_month: isMsi ? billingMonthISO : null, // primer billing month
+    msi_start_month: isMsi ? billingMonthISO : null, // primer billing month (mes B)
     msi_total_amount: isMsi ? money2(msiTotal) : null
   };
 
