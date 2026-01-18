@@ -22,7 +22,7 @@ function deepSeekSystemInstruction() {
     "- msi_months = el número de meses (ej: 6)",
     "- msi_total_amount = el monto TOTAL de la compra (el monto que aparece en el texto)",
     "- amount_mxn = monto mensual aproximado = msi_total_amount / msi_months (redondea a 2 decimales).",
-    "Si no encuentras el número de meses, devuelve error pidiendo meses.",
+    "Si detectas MSI pero no viene el número de meses, devuelve error preguntando: ¿a cuántos meses?",
     "",
     "Reglas de fecha: si el texto contiene 'hoy' usa Hoy; si contiene 'ayer' usa Hoy - 1 día; si contiene 'antier' o 'anteayer' usa Hoy - 2 días. Esto es obligatorio."
   ].join(" ");
@@ -38,6 +38,7 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
     text,
     "",
     "Devuelve SOLO JSON con una de estas dos formas:",
+    "Si detectas MSI pero no hay número de meses, devuelve error preguntando: ¿a cuántos meses?",
     "1) Éxito:",
     JSON.stringify({
       amount_mxn: 230,
