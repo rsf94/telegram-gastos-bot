@@ -1,10 +1,5 @@
 import { tgSend, escapeHtml } from "./telegram.js";
-import {
-  getActiveCardRules,
-  sumExpensesForCycle,
-  alreadySentReminder,
-  logReminderSent
-} from "./storage/bigquery.js";
+import { getActiveCardRules, sumExpensesForCycle, alreadySentReminder, logReminderSent } from "./storage/bigquery.js";
 import { todayISOInTZ } from "./parsing.js";
 
 // --- Date helpers (robustos contra TZ/DST) ---
