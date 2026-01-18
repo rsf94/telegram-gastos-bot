@@ -28,14 +28,21 @@ const draftByChat = new Map(); // chatId -> draft
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
+
 function monthStartISO(yyyyMmDd) {
   return `${String(yyyyMmDd).slice(0, 7)}-01`;
 }
+
 function looksLikeMsiText(text) {
   const t = String(text || "").toLowerCase();
   // cubre: "msi", "a msi", "6msi", "6 msi", "meses sin intereses"
-  return /\bmsi\b/.test(t) || /\bmeses?\s+sin\s+intereses?\b/.test(t) || /\d+\s*msi\b/.test(t);
+  return (
+    /\bmsi\b/.test(t) ||
+    /\bmeses?\s+sin\s+intereses?\b/.test(t) ||
+    /\d+\s*msi\b/.test(t)
+  );
 }
+
 function parseJustMonths(text) {
   // Acepta "6", "6 meses", "a 6", "6 msi"
   const t = String(text || "").toLowerCase().trim();
@@ -46,6 +53,35 @@ function parseJustMonths(text) {
   return n;
 }
 
+function formatBigQueryError(e) {
+  if (!e) return "Error desconocido";
+
+  // BigQuery insert puede tirar PartialFailureError con .errors
+  if (e.name === "PartialFailureError" && Array.isArray(e.errors)) {
+    const first = e.errors[0];
+    const inner = first?.errors?.[0];
+    if (inner) {
+      const loc = inner.location ? ` en "${inner.location}"` : "";
+      return `BigQuery rechazó el registro${loc}: ${inner.message || inner.reason || "invalid"}`;
+    }
+    return "BigQuery rechazó el registro (PartialFailureError).";
+  }
+
+  return e.message || String(e);
+}
+
+function logBigQueryError(e) {
+  console.error("❌ Error al guardar en BigQuery:", e?.name, e?.message);
+  try {
+    console.error("BigQuery e.errors:", JSON.stringify(e?.errors, null, 2));
+  } catch (_) {
+    // ignore
+  }
+}
+
+/* =======================
+ * Routes
+ * ======================= */
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.post("/telegram-webhook", async (req, res) => {
@@ -54,64 +90,66 @@ app.post("/telegram-webhook", async (req, res) => {
   try {
     const update = req.body;
 
+    // =========================
     // 1) callbacks (botones)
+    // =========================
     const cb = update.callback_query;
     if (cb?.message?.chat?.id) {
       const chatId = String(cb.message.chat.id);
       const data = cb.data;
 
+      // ❌ Cancelar
       if (data === "cancel") {
-        // quita "loading" del botón
-        await answerCallbackQuery(cb.id);
         draftByChat.delete(chatId);
         await tgSend(chatId, "🧹 <b>Cancelado</b>.");
+        await answerCallbackQuery(cb.id);
         return;
       }
 
+      // ✅ Confirmar (normal o MSI)
       if (data === "confirm") {
-        // quita "loading" del botón inmediatamente (BigQuery puede tardar)
-        await answerCallbackQuery(cb.id);
-
         const draft = draftByChat.get(chatId);
+
         if (!draft) {
           await tgSend(chatId, "No tengo borrador. Mándame un gasto primero.");
-          return;
-        }
-
-        if (draft.__state === "awaiting_msi_months") {
-          await tgSend(chatId, "Primero dime a cuántos meses es el MSI (ej: <code>6</code>).");
+          await answerCallbackQuery(cb.id);
           return;
         }
 
         try {
           const expenseId = await insertExpenseAndMaybeInstallments(draft, chatId);
           draftByChat.delete(chatId);
+
           await tgSend(
             chatId,
-            `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`
+            `✅ <b>Guardado</b>\nID: <code>${escapeHtml(expenseId)}</code>`
           );
         } catch (e) {
-          console.error("Confirm insert failed:", e);
-          const msg = String(e?.message || e);
-          await tgSend(chatId, `❌ <b>No se pudo guardar</b>.\n<code>${escapeHtml(msg)}</code>`);
+          logBigQueryError(e);
+          const pretty = formatBigQueryError(e);
+          await tgSend(chatId, `❌ <b>No se pudo guardar</b>\n${escapeHtml(pretty)}`);
         }
+
+        await answerCallbackQuery(cb.id);
         return;
       }
 
+      // ✏️ Menú editar
       if (data === "edit_menu") {
-        await answerCallbackQuery(cb.id);
         await tgSend(chatId, "¿Qué quieres editar?", { reply_markup: editMenuKeyboard() });
+        await answerCallbackQuery(cb.id);
         return;
       }
 
+      // ⬅️ Volver al preview
       if (data === "back_preview") {
-        await answerCallbackQuery(cb.id);
         const draft = draftByChat.get(chatId);
         if (!draft) {
           await tgSend(chatId, "No tengo borrador activo.");
         } else {
           await tgSend(chatId, preview(draft), { reply_markup: mainKeyboard() });
         }
+        await answerCallbackQuery(cb.id);
         return;
       }
 
@@ -119,7 +157,9 @@ app.post("/telegram-webhook", async (req, res) => {
       return;
     }
 
+    // =========================
     // 2) mensajes
+    // =========================
     const msg = update.message || update.edited_message;
     if (!msg?.chat?.id) return;
 
@@ -171,22 +211,17 @@ app.post("/telegram-webhook", async (req, res) => {
         return;
       }
 
-      if (draft.__state === "awaiting_msi_months") {
-        await tgSend(chatId, "Primero dime a cuántos meses es el MSI (ej: <code>6</code>).");
-        return;
-      }
-
       try {
         const expenseId = await insertExpenseAndMaybeInstallments(draft, chatId);
         draftByChat.delete(chatId);
         await tgSend(
           chatId,
-          `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`
+          `✅ <b>Guardado</b>\nID: <code>${escapeHtml(expenseId)}</code>`
         );
       } catch (e) {
-        console.error("Text confirm insert failed:", e);
-        const msg = String(e?.message || e);
-        await tgSend(chatId, `❌ <b>No se pudo guardar</b>.\n<code>${escapeHtml(msg)}</code>`);
+        logBigQueryError(e);
+        const pretty = formatBigQueryError(e);
+        await tgSend(chatId, `❌ <b>No se pudo guardar</b>\n${escapeHtml(pretty)}`);
       }
       return;
     }
@@ -205,9 +240,9 @@ app.post("/telegram-webhook", async (req, res) => {
       existing.is_msi = true;
       existing.msi_months = n;
 
-      // Si no existe total, usa lo que haya en amount_mxn como total (por seguridad)
+      // total compra debe existir; si no, usa amount_mxn (por seguridad)
       if (!existing.msi_total_amount || Number(existing.msi_total_amount) <= 0) {
-        existing.msi_total_amount = Number(existing.msi_total_amount || existing.amount_mxn);
+        existing.msi_total_amount = Number(existing.amount_mxn);
       }
 
       // start_month default al mes de compra
@@ -236,7 +271,7 @@ app.post("/telegram-webhook", async (req, res) => {
     // - pregunta meses.
     // =========================
     if (wantsMsi) {
-      let draft;
+      let draft = null;
 
       // 1) intentar IA
       try {
@@ -246,7 +281,10 @@ app.post("/telegram-webhook", async (req, res) => {
         if (v.ok) {
           draft = v.draft;
         } else {
-          draft = null;
+          // si el AI ya detectó MSI sin meses y nos dio draft parcial
+          if (v.needs_msi_months && v.draft) {
+            draft = v.draft;
+          }
         }
       } catch (e) {
         draft = null;
@@ -267,7 +305,7 @@ app.post("/telegram-webhook", async (req, res) => {
       draft.raw_text = text;
       draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
 
-      // En MSI: interpretamos el monto del texto como TOTAL (msi_total_amount)
+      // interpretamos el monto del texto como TOTAL de la compra
       draft.is_msi = true;
       draft.msi_total_amount = Number(draft.msi_total_amount || draft.amount_mxn);
       draft.msi_months = null;
