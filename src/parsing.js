@@ -50,6 +50,27 @@ export function overrideRelativeDate(text, currentISO) {
   return currentISO;
 }
 
+/* =======================
+ * Helpers MSI / money
+ * ======================= */
+function round2(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
+function monthStartISO(yyyyMmDd) {
+  // yyyyMmDd = YYYY-MM-DD -> YYYY-MM-01
+  return `${String(yyyyMmDd).slice(0, 7)}-01`;
+}
+
+function formatMoneyMXN(n) {
+  const x = Number(n || 0);
+  return x.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
+}
+
+/* =======================
+ * Naive parse (fallback)
+ * - sigue simple, pero detecta "msi" básico
+ * ======================= */
 export function naiveParse(text) {
   const m = text.match(/(\d+(\.\d+)?)/);
   const amount = m ? Number(m[1]) : NaN;
@@ -66,19 +87,62 @@ export function naiveParse(text) {
 
   const desc = text.replace(m ? m[0] : "", "").trim();
 
+  // MSI detect súper simple en fallback
+  const low = (text || "").toLowerCase();
+  const is_msi = /\bmsi\b|meses\s+sin\s+intereses/.test(low);
+
+  // intenta sacar "6" en "6MSI" / "6 MSI"
+  let msi_months = null;
+  const mm = low.match(/(\d{1,2})\s*msi\b/);
+  if (mm) msi_months = Number(mm[1]);
+
+  // en naive: asumimos que el monto escrito es total si es MSI
+  const msi_total_amount = is_msi && isFinite(amount) ? amount : null;
+
+  // mensualidad si ya sabemos meses
+  const monthly =
+    is_msi && isFinite(msi_total_amount) && isFinite(msi_months) && msi_months > 1
+      ? round2(msi_total_amount / msi_months)
+      : amount;
+
   return {
-    amount_mxn: amount,
+    amount_mxn: monthly,
     payment_method: pm,
     category,
     purchase_date: d || today,
     merchant: "",
-    description: desc || "Gasto"
+    description: desc || "Gasto",
+
+    // MSI fields
+    is_msi,
+    msi_months,
+    msi_total_amount,
+    msi_start_month: is_msi ? monthStartISO(d || today) : null
   };
 }
 
+/* =======================
+ * Validate draft (incluye MSI)
+ * ======================= */
 export function validateDraft(d) {
-  if (!isFinite(d.amount_mxn) || d.amount_mxn <= 0) {
-    return "❌ Monto inválido. Ej: 230 Uber American Express ayer";
+  // Si es MSI y faltan meses, NO lo marques como error duro:
+  // tu index.js ya tiene el flujo para pedir "¿a cuántos meses?"
+  if (d?.is_msi === true) {
+    // monto total debe existir
+    if (!isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
+      return "❌ MSI detectado pero falta el monto total. Ej: 1200 gasolinera MSI BBVA Platino";
+    }
+    // meses pueden faltar (se preguntan), pero si vienen deben ser válidos
+    if (d.msi_months != null) {
+      const n = Number(d.msi_months);
+      if (!Number.isFinite(n) || n <= 1 || n > 60) {
+        return "❌ Meses MSI inválidos. Ej: 6, 12, 18, 24.";
+      }
+    }
+  } else {
+    if (!isFinite(d.amount_mxn) || d.amount_mxn <= 0) {
+      return "❌ Monto inválido. Ej: 230 Uber American Express ayer";
+    }
   }
 
   if (!d.payment_method) {
@@ -100,16 +164,44 @@ export function validateDraft(d) {
   return null;
 }
 
+/* =======================
+ * Preview (MSI-friendly)
+ * ======================= */
 export function preview(d) {
-  const lines = [
-    "🧾 <b>Confirmar gasto</b>",
-    `Monto: <b>$${Math.round(d.amount_mxn)} MXN</b>`,
-    `Método: <b>${escapeHtml(d.payment_method)}</b>`,
-    `Fecha: <b>${escapeHtml(d.purchase_date)}</b>`,
-    `Categoría: <b>${escapeHtml(d.category)}</b>`,
-    `Descripción: ${escapeHtml(d.description)}`
-  ];
+  const lines = ["🧾 <b>Confirmar gasto</b>"];
+
+  const isMsi = d?.is_msi === true;
+
+  if (isMsi) {
+    const total = Number(d.msi_total_amount || 0);
+    const months = d.msi_months != null ? Number(d.msi_months) : null;
+
+    lines.push(`Tipo: <b>MSI</b>`);
+    lines.push(`Total compra: <b>${escapeHtml(formatMoneyMXN(total))}</b>`);
+
+    if (!months || !Number.isFinite(months) || months <= 1) {
+      lines.push(`Meses: <b>❓ (falta)</b>`);
+      lines.push(`Mensualidad: <b>—</b>`);
+    } else {
+      const monthly = isFinite(d.amount_mxn) && d.amount_mxn > 0
+        ? Number(d.amount_mxn)
+        : round2(total / months);
+      lines.push(`Meses: <b>${escapeHtml(String(months))}</b>`);
+      lines.push(`Mensualidad aprox: <b>${escapeHtml(formatMoneyMXN(monthly))}</b>`);
+    }
+
+    const sm = d.msi_start_month || monthStartISO(d.purchase_date);
+    lines.push(`Mes de inicio: <b>${escapeHtml(sm)}</b>`);
+  } else {
+    lines.push(`Monto: <b>${escapeHtml(formatMoneyMXN(d.amount_mxn))}</b>`);
+  }
+
+  lines.push(`Método: <b>${escapeHtml(d.payment_method)}</b>`);
+  lines.push(`Fecha: <b>${escapeHtml(d.purchase_date)}</b>`);
+  lines.push(`Categoría: <b>${escapeHtml(d.category)}</b>`);
+  lines.push(`Descripción: ${escapeHtml(d.description)}`);
   if (d.merchant) lines.push(`Comercio: ${escapeHtml(d.merchant)}`);
+
   lines.push("", "Toca un botón:");
   return lines.join("\n");
 }
