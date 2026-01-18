@@ -7,18 +7,30 @@ import { BQ_PROJECT_ID, BQ_DATASET, BQ_TABLE } from "../config.js";
 const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
 
 /* =======================
+ * Helpers
+ * ======================= */
+function round2(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+function money2(n) {
+  // BigQuery NUMERIC: mejor como string con 2 decimales
+  const x = round2(Number(n || 0));
+  return x.toFixed(2);
+}
+
+/* =======================
  * Insertar gasto SIMPLE (legacy / no MSI schedule)
- * - Déjalo por compatibilidad si quieres.
- * - Para MSI usa insertExpenseAndMaybeInstallments()
  * ======================= */
 export async function insertExpenseToBQ(draft, chatId) {
   const table = bq.dataset(BQ_DATASET).table(BQ_TABLE);
+
+  const isMsi = draft.is_msi === true;
 
   const row = {
     id: crypto.randomUUID(),
     created_at: new Date().toISOString(),
     purchase_date: draft.purchase_date,
-    amount_mxn: Number(draft.amount_mxn),
+    amount_mxn: money2(draft.amount_mxn),
     payment_method: draft.payment_method,
     category: draft.category || "Other",
     merchant: draft.merchant || null,
@@ -27,11 +39,12 @@ export async function insertExpenseToBQ(draft, chatId) {
     source: "telegram",
     chat_id: String(chatId),
 
-    // MSI (si vienen, los guarda; pero no genera installments)
-    is_msi: draft.is_msi === true,
-    msi_months: draft.is_msi ? Number(draft.msi_months || null) : null,
-    msi_start_month: draft.is_msi ? (draft.msi_start_month || null) : null,
-    msi_total_amount: draft.is_msi ? Number(draft.msi_total_amount || draft.amount_mxn) : null
+    is_msi: isMsi,
+    msi_months: isMsi ? Number(draft.msi_months || null) : null,
+    msi_start_month: isMsi ? (draft.msi_start_month || null) : null,
+    msi_total_amount: isMsi
+      ? money2(draft.msi_total_amount || draft.amount_mxn)
+      : null
   };
 
   await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
@@ -61,7 +74,7 @@ export async function getActiveCardRules() {
 }
 
 /* =======================
- * Sumar gastos de un ciclo (NO MSI, como antes)
+ * Sumar gastos de un ciclo (NO MSI)
  * ======================= */
 export async function sumExpensesForCycle({ chatId, cardName, startISO, endISO }) {
   const query = `
@@ -71,9 +84,6 @@ export async function sumExpensesForCycle({ chatId, cardName, startISO, endISO }
     WHERE chat_id = @chat_id
       AND payment_method = @card_name
       AND purchase_date BETWEEN DATE(@start_date) AND DATE(@end_date)
-      -- MSI ignorados por ahora (heurística simple)
-      AND (raw_text IS NULL OR LOWER(raw_text) NOT LIKE '%msi%')
-      AND (description IS NULL OR LOWER(description) NOT LIKE '%msi%')
       AND (is_msi IS NULL OR is_msi = FALSE)
   `;
 
@@ -90,7 +100,6 @@ export async function sumExpensesForCycle({ chatId, cardName, startISO, endISO }
 
   const [job] = await bq.createQueryJob(options);
   const [rows] = await job.getQueryResults();
-
   return Number(rows?.[0]?.total || 0);
 }
 
@@ -134,7 +143,7 @@ export async function logReminderSent({ chatId, cardName, cutISO }) {
 }
 
 /* =======================
- * Opcional: lista dinámica de tarjetas activas
+ * Lista dinámica de tarjetas activas
  * ======================= */
 export async function getActiveCardNames() {
   const query = `
@@ -150,7 +159,7 @@ export async function getActiveCardNames() {
 }
 
 /* =======================
- * MSI: calcular billing_month ("Sheet month B") para una compra
+ * MSI: billing_month ("Sheet month B") para una compra
  * ======================= */
 export async function getBillingMonthForPurchase({ chatId, cardName, purchaseDateISO }) {
   const query = `
@@ -218,6 +227,22 @@ function addMonthsYYYYMM01(yyyyMm01, k) {
   return nd.toISOString().slice(0, 10);
 }
 
+async function installmentsExistForExpense(expenseId) {
+  const query = `
+    SELECT COUNT(1) AS c
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+    WHERE expense_id = @expense_id
+  `;
+  const options = {
+    query,
+    params: { expense_id: String(expenseId) },
+    parameterMode: "NAMED"
+  };
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return Number(rows?.[0]?.c || 0) > 0;
+}
+
 export async function createInstallmentsForExpense({
   expenseId,
   chatId,
@@ -226,6 +251,9 @@ export async function createInstallmentsForExpense({
   monthsTotal,
   totalAmount
 }) {
+  // ✅ dedupe simple
+  if (await installmentsExistForExpense(expenseId)) return 0;
+
   const table = bq.dataset(BQ_DATASET).table("installments");
   const amounts = splitIntoInstallments(totalAmount, monthsTotal);
   const nowISO = new Date().toISOString();
@@ -238,7 +266,7 @@ export async function createInstallmentsForExpense({
     billing_month: addMonthsYYYYMM01(billingMonthISO, i), // YYYY-MM-01
     installment_number: i + 1,
     months_total: Number(monthsTotal),
-    amount_mxn: Number(amt),
+    amount_mxn: money2(amt),
     status: "SCHEDULED",
     created_at: nowISO
   }));
@@ -248,7 +276,7 @@ export async function createInstallmentsForExpense({
 }
 
 /* =======================
- * ✅ FUNCIÓN PRINCIPAL NUEVA:
+ * ✅ FUNCIÓN PRINCIPAL:
  * Inserta expense y si es MSI genera installments
  * ======================= */
 export async function insertExpenseAndMaybeInstallments(draft, chatId) {
@@ -260,6 +288,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
   let billingMonthISO = null;
   let msiMonths = null;
   let msiTotal = null;
+  let monthlyAmount = null;
 
   if (isMsi) {
     msiMonths = Number(draft.msi_months);
@@ -267,11 +296,16 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
       throw new Error("MSI inválido: msi_months debe ser >= 2");
     }
 
-    msiTotal = Number(draft.msi_total_amount || draft.amount_mxn);
+    // ✅ total real de la compra (no mensual)
+    msiTotal = Number(draft.msi_total_amount);
     if (!Number.isFinite(msiTotal) || msiTotal <= 0) {
-      throw new Error("MSI inválido: total amount debe ser > 0");
+      throw new Error("MSI inválido: msi_total_amount debe ser > 0");
     }
 
+    // ✅ cashflow mensual (aunque deepseek se equivoque)
+    monthlyAmount = round2(msiTotal / msiMonths);
+
+    // ✅ mes B según card_rules
     billingMonthISO = await getBillingMonthForPurchase({
       chatId,
       cardName: draft.payment_method,
@@ -283,7 +317,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     id: expenseId,
     created_at: new Date().toISOString(),
     purchase_date: draft.purchase_date,
-    amount_mxn: Number(draft.amount_mxn),
+    amount_mxn: isMsi ? money2(monthlyAmount) : money2(draft.amount_mxn),
     payment_method: draft.payment_method,
     category: draft.category || "Other",
     merchant: draft.merchant || null,
@@ -292,11 +326,10 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     source: "telegram",
     chat_id: String(chatId),
 
-    // MSI fields
     is_msi: isMsi,
     msi_months: isMsi ? msiMonths : null,
-    msi_start_month: isMsi ? billingMonthISO : null,
-    msi_total_amount: isMsi ? msiTotal : null
+    msi_start_month: isMsi ? billingMonthISO : null, // primer billing month
+    msi_total_amount: isMsi ? money2(msiTotal) : null
   };
 
   await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
