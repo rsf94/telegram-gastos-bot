@@ -126,3 +126,19 @@ export async function logReminderSent({ chatId, cardName, cutISO }) {
     }
   ]);
 }
+
+/* =======================
+ * NUEVO: tarjetas activas
+ * ======================= */
+export async function getActiveCardNames() {
+  const query = `
+    SELECT DISTINCT card_name
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.card_rules\`
+    WHERE active = TRUE
+  `;
+
+  const [job] = await bq.createQueryJob({ query });
+  const [rows] = await job.getQueryResults();
+
+  return rows.map(r => r.card_name);
+}
