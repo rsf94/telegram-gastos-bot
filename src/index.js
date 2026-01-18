@@ -1,7 +1,7 @@
 import express from "express";
 
 import { warnMissingEnv, ALLOWED_PAYMENT_METHODS } from "./config.js";
-import { tgSend, confirmKeyboard, answerCallbackQuery, escapeHtml } from "./telegram.js";
+import { tgSend, mainKeyboard, answerCallbackQuery, escapeHtml } from "./telegram.js";
 import { insertExpenseToBQ } from "./storage/bigquery.js";
 import { callDeepSeekParse, validateParsedFromAI } from "./deepseek.js";
 import { naiveParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
@@ -128,7 +128,7 @@ app.post("/telegram-webhook", async (req, res) => {
     }
 
     draftByChat.set(chatId, draft);
-    await tgSend(chatId, preview(draft), { reply_markup: confirmKeyboard() });
+    await tgSend(chatId, preview(draft), { reply_markup: mainKeyboard() });
 
   } catch (e) {
     console.error(e);
