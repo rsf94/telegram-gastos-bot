@@ -1,3 +1,4 @@
+// src/deepseek.js
 import { DEEPSEEK_API_KEY, ALLOWED_CATEGORIES } from "./config.js";
 import { getAllowedPaymentMethods } from "./cards.js";
 import { todayISOInTZ } from "./parsing.js";
@@ -7,12 +8,25 @@ function deepSeekSystemInstruction() {
     "Eres un parser de gastos. Devuelve UNICAMENTE JSON válido (sin backticks, sin texto extra).",
     "Si falta un dato crítico o hay ambigüedad, devuelve JSON con {\"error\":\"...\"}.",
     "NO inventes. Si no estás seguro, error.",
+    "",
+    "Campos obligatorios en éxito: amount_mxn, payment_method, category, purchase_date, merchant, description.",
     "payment_method debe ser EXACTAMENTE uno de la lista permitida.",
     "category debe ser EXACTAMENTE una de la lista permitida.",
     "purchase_date debe ser YYYY-MM-DD.",
     "Si el usuario escribe 'Amex', es ambiguo: debe ser 'American Express' o 'Amex Aeromexico' → error pidiendo aclaración.",
     "merchant debe ser un nombre corto y limpio (ej. 'Uber', 'Chedraui', 'Amazon').",
     "description debe ser corta y útil.",
+    "",
+    "=== MSI ===",
+    "Detecta MSI si el texto contiene 'msi' o 'meses' o 'a N meses' o 'N meses sin intereses'.",
+    "Si detectas MSI, incluye además:",
+    "- is_msi: true",
+    "- msi_months: N (entero > 1)",
+    "- msi_total_amount: total de la compra (NUMERIC). Si no se menciona otro total, usa amount_mxn como total.",
+    "Si hay MSI pero no puedes inferir N con certeza, devuelve error solicitando los meses.",
+    "Si no hay MSI, incluye is_msi:false y deja msi_* como null/omitidos.",
+    "",
+    "=== Reglas de fecha ===",
     "Reglas de fecha: si el texto contiene 'hoy' usa Hoy; si contiene 'ayer' usa Hoy - 1 día; si contiene 'antier' o 'anteayer' usa Hoy - 2 días. Esto es obligatorio."
   ].join(" ");
 }
@@ -27,16 +41,34 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
     text,
     "",
     "Devuelve SOLO JSON con una de estas dos formas:",
-    "1) Éxito:",
+    "",
+    "1) Éxito SIN MSI:",
     JSON.stringify({
       amount_mxn: 230,
       payment_method: "Banorte Platino",
       category: "Transport",
       purchase_date: "2026-01-16",
       merchant: "Uber",
-      description: "Viaje Uber"
+      description: "Viaje Uber",
+      is_msi: false,
+      msi_months: null,
+      msi_total_amount: null
     }),
-    "2) Error (si falta info o hay duda):",
+    "",
+    "2) Éxito CON MSI (ej: '13878 Palacio de Hierro American Express a 6 meses'):",
+    JSON.stringify({
+      amount_mxn: 13878,
+      payment_method: "American Express",
+      category: "E-commerce",
+      purchase_date: "2026-01-18",
+      merchant: "Palacio de Hierro",
+      description: "Compra a MSI",
+      is_msi: true,
+      msi_months: 6,
+      msi_total_amount: 13878
+    }),
+    "",
+    "3) Error (si falta info o hay duda):",
     JSON.stringify({
       error: "Explica qué falta o qué es ambiguo y qué debe aclarar el usuario."
     }),
@@ -55,14 +87,25 @@ function extractJsonObject(text) {
   return JSON.parse(m[0]);
 }
 
+function parseMaybeInt(x) {
+  if (x === null || x === undefined || x === "") return null;
+  const n = Number(x);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
+function parseMaybeNumber(x) {
+  if (x === null || x === undefined || x === "") return null;
+  const n = Number(x);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
 export async function callDeepSeekParse(text) {
   if (!DEEPSEEK_API_KEY) throw new Error("Missing env var: DEEPSEEK_API_KEY");
 
-  // ✅ CDMX: evita bug de UTC (toISOString) que te daba "mañana"
-  const today = todayISOInTZ();
-
-  // ✅ dinámico desde card_rules (cacheado por cards.js)
-  const allowedPaymentMethods = await getAllowedPaymentMethods();
+  const today = todayISOInTZ(); // CDMX
+  const allowedPaymentMethods = await getAllowedPaymentMethods(); // dinámico (card_rules)
 
   const payload = {
     model: "deepseek-chat",
@@ -90,9 +133,11 @@ export async function callDeepSeekParse(text) {
   return extractJsonObject(out);
 }
 
-// ✅ OJO: ahora es async porque valida contra lista dinámica
+// ✅ async porque payment methods son dinámicos
 export async function validateParsedFromAI(obj) {
   if (obj?.error) return { ok: false, error: String(obj.error) };
+
+  const isMsi = obj.is_msi === true;
 
   const d = {
     amount_mxn: Number(obj.amount_mxn),
@@ -100,7 +145,10 @@ export async function validateParsedFromAI(obj) {
     category: String(obj.category || ""),
     purchase_date: String(obj.purchase_date || ""),
     merchant: String(obj.merchant || ""),
-    description: String(obj.description || "")
+    description: String(obj.description || ""),
+    is_msi: isMsi,
+    msi_months: isMsi ? parseMaybeInt(obj.msi_months) : null,
+    msi_total_amount: isMsi ? parseMaybeNumber(obj.msi_total_amount ?? obj.amount_mxn) : null
   };
 
   if (!isFinite(d.amount_mxn) || d.amount_mxn <= 0) {
@@ -112,7 +160,6 @@ export async function validateParsedFromAI(obj) {
   }
 
   const allowedPaymentMethods = await getAllowedPaymentMethods();
-
   if (!allowedPaymentMethods.includes(d.payment_method)) {
     return {
       ok: false,
@@ -132,6 +179,24 @@ export async function validateParsedFromAI(obj) {
   }
 
   if (!d.description) d.description = "Gasto";
+
+  // ✅ Validación MSI
+  if (d.is_msi) {
+    if (!d.msi_months || !Number.isFinite(d.msi_months) || d.msi_months < 2) {
+      return { ok: false, error: "MSI detectado, pero faltan los meses. Ej: '13878 Palacio American Express a 6 meses'." };
+    }
+    if (d.msi_months > 60) {
+      return { ok: false, error: "MSI inválido: meses demasiado altos. Revisa el número de meses." };
+    }
+    if (!Number.isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
+      return { ok: false, error: "MSI inválido: msi_total_amount debe ser > 0." };
+    }
+
+    // Si el modelo puso amount_mxn distinto al total, forzamos consistencia:
+    // En tu diseño: amount_mxn representa el TOTAL de la compra (para MSI).
+    // (El flujo de cash lo calcula installments.)
+    d.amount_mxn = Number(d.msi_total_amount);
+  }
 
   return { ok: true, draft: d };
 }
