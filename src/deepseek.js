@@ -1,9 +1,5 @@
-import {
-  DEEPSEEK_API_KEY,
-  ALLOWED_PAYMENT_METHODS,
-  ALLOWED_CATEGORIES
-} from "./config.js";
-
+import { DEEPSEEK_API_KEY, ALLOWED_CATEGORIES } from "./config.js";
+import { getAllowedPaymentMethods } from "./cards.js";
 import { todayISOInTZ } from "./parsing.js";
 
 function deepSeekSystemInstruction() {
@@ -21,7 +17,7 @@ function deepSeekSystemInstruction() {
   ].join(" ");
 }
 
-function deepSeekUserPrompt(text, todayISO) {
+function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
   return [
     "Extrae un gasto del texto del usuario.",
     "",
@@ -42,14 +38,13 @@ function deepSeekUserPrompt(text, todayISO) {
     }),
     "2) Error (si falta info o hay duda):",
     JSON.stringify({
-      error:
-        "Explica qué falta o qué es ambiguo y qué debe aclarar el usuario."
+      error: "Explica qué falta o qué es ambiguo y qué debe aclarar el usuario."
     }),
     "",
-    "Métodos de pago permitidos:",
-    ALLOWED_PAYMENT_METHODS.join(" | "),
+    "Métodos de pago permitidos (payment_method):",
+    allowedPaymentMethods.join(" | "),
     "",
-    "Categorías permitidas:",
+    "Categorías permitidas (category):",
     ALLOWED_CATEGORIES.join(" | ")
   ].join("\n");
 }
@@ -66,12 +61,15 @@ export async function callDeepSeekParse(text) {
   // ✅ CDMX: evita bug de UTC (toISOString) que te daba "mañana"
   const today = todayISOInTZ();
 
+  // ✅ dinámico desde card_rules (cacheado por cards.js)
+  const allowedPaymentMethods = await getAllowedPaymentMethods();
+
   const payload = {
     model: "deepseek-chat",
     temperature: 0.2,
     messages: [
       { role: "system", content: deepSeekSystemInstruction() },
-      { role: "user", content: deepSeekUserPrompt(text, today) }
+      { role: "user", content: deepSeekUserPrompt(text, today, allowedPaymentMethods) }
     ]
   };
 
@@ -92,7 +90,8 @@ export async function callDeepSeekParse(text) {
   return extractJsonObject(out);
 }
 
-export function validateParsedFromAI(obj) {
+// ✅ OJO: ahora es async porque valida contra lista dinámica
+export async function validateParsedFromAI(obj) {
   if (obj?.error) return { ok: false, error: String(obj.error) };
 
   const d = {
@@ -112,20 +111,19 @@ export function validateParsedFromAI(obj) {
     return { ok: false, error: "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico." };
   }
 
-  if (!ALLOWED_PAYMENT_METHODS.includes(d.payment_method)) {
+  const allowedPaymentMethods = await getAllowedPaymentMethods();
+
+  if (!allowedPaymentMethods.includes(d.payment_method)) {
     return {
       ok: false,
-      error:
-        "Método de pago inválido. Usa uno de:\n- " +
-        ALLOWED_PAYMENT_METHODS.join("\n- ")
+      error: "Método de pago inválido. Usa uno de:\n- " + allowedPaymentMethods.join("\n- ")
     };
   }
 
   if (!ALLOWED_CATEGORIES.includes(d.category)) {
     return {
       ok: false,
-      error:
-        "Categoría inválida. Debe ser una de tu lista (ej. Transport, Groceries, Restaurant)."
+      error: "Categoría inválida. Debe ser una de tu lista (ej. Transport, Groceries, Restaurant)."
     };
   }
 
