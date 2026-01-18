@@ -1,23 +1,51 @@
 import { ALLOWED_PAYMENT_METHODS, ALLOWED_CATEGORIES } from "./config.js";
 import { escapeHtml } from "./telegram.js";
 
-export function minusDaysISO(todayISO, days) {
-  const d = new Date(todayISO + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() - days);
-  return d.toISOString().slice(0, 10);
+/**
+ * Timezone app (CDMX) para evitar el bug de "mañana" por usar UTC (toISOString).
+ */
+export const APP_TZ = "America/Mexico_City";
+
+/**
+ * Devuelve YYYY-MM-DD usando la zona horaria indicada (default CDMX).
+ * (en-CA formatea como YYYY-MM-DD)
+ */
+export function todayISOInTZ(tz = APP_TZ) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
 }
 
+/**
+ * Resta días a una fecha YYYY-MM-DD de forma estable.
+ * Usamos 12:00 UTC para evitar saltos raros por horario.
+ */
+export function minusDaysISOFromTZDate(yyyy_mm_dd, days) {
+  const [y, m, d] = yyyy_mm_dd.split("-").map(Number);
+  const base = new Date(Date.UTC(y, m - 1, d, 12, 0, 0)); // 12:00 UTC
+  base.setUTCDate(base.getUTCDate() - days);
+  return base.toISOString().slice(0, 10);
+}
+
+/**
+ * Sobrescribe la fecha si detecta "hoy/ayer/antier" (o anteayer).
+ * Si hay fecha explícita YYYY-MM-DD, se respeta.
+ */
 export function overrideRelativeDate(text, currentISO) {
   const t = (text || "").toLowerCase();
 
+  // si el usuario pone una fecha explícita YYYY-MM-DD, respétala
   const explicit = (text.match(/\b\d{4}-\d{2}-\d{2}\b/) || [])[0];
   if (explicit) return explicit;
 
-  const todayISO = new Date().toISOString().slice(0, 10);
+  const today = todayISOInTZ(); // CDMX
 
-  if (/\bantier\b|\banteayer\b/.test(t)) return minusDaysISO(todayISO, 2);
-  if (/\bayer\b/.test(t)) return minusDaysISO(todayISO, 1);
-  if (/\bhoy\b/.test(t)) return todayISO;
+  if (/\bantier\b|\banteayer\b/.test(t)) return minusDaysISOFromTZDate(today, 2);
+  if (/\bayer\b/.test(t)) return minusDaysISOFromTZDate(today, 1);
+  if (/\bhoy\b/.test(t)) return today;
 
   return currentISO;
 }
@@ -26,11 +54,15 @@ export function naiveParse(text) {
   const m = text.match(/(\d+(\.\d+)?)/);
   const amount = m ? Number(m[1]) : NaN;
 
-  const pm = ALLOWED_PAYMENT_METHODS.find(x => text.toLowerCase().includes(x.toLowerCase())) || "";
+  const pm =
+    ALLOWED_PAYMENT_METHODS.find((x) =>
+      text.toLowerCase().includes(x.toLowerCase())
+    ) || "";
+
   const category = "Other";
 
   const d = (text.match(/\b\d{4}-\d{2}-\d{2}\b/) || [])[0];
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISOInTZ(); // CDMX
 
   const desc = text.replace(m ? m[0] : "", "").trim();
 
@@ -53,7 +85,10 @@ export function validateDraft(d) {
     if ((d.description || "").toLowerCase().includes("amex")) {
       return "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico.";
     }
-    return "❌ Método de pago inválido. Usa uno de:\n- " + ALLOWED_PAYMENT_METHODS.join("\n- ");
+    return (
+      "❌ Método de pago inválido. Usa uno de:\n- " +
+      ALLOWED_PAYMENT_METHODS.join("\n- ")
+    );
   }
 
   if (!ALLOWED_CATEGORIES.includes(d.category)) d.category = "Other";
