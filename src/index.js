@@ -1,7 +1,13 @@
 import express from "express";
 
 import { warnMissingEnv, ALLOWED_PAYMENT_METHODS } from "./config.js";
-import { tgSend, mainKeyboard, answerCallbackQuery, escapeHtml } from "./telegram.js";
+import {
+  tgSend,
+  mainKeyboard,
+  editMenuKeyboard,
+  answerCallbackQuery,
+  escapeHtml
+} from "./telegram.js";
 import { insertExpenseToBQ } from "./storage/bigquery.js";
 import { callDeepSeekParse, validateParsedFromAI } from "./deepseek.js";
 import { naiveParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
@@ -28,18 +34,52 @@ app.post("/telegram-webhook", async (req, res) => {
       const chatId = String(cb.message.chat.id);
       const data = cb.data;
 
+      // ❌ Cancelar
       if (data === "cancel") {
         draftByChat.delete(chatId);
         await tgSend(chatId, "🧹 <b>Cancelado</b>.");
-      } else if (data === "confirm") {
+        await answerCallbackQuery(cb.id);
+        return;
+      }
+
+      // ✅ Confirmar
+      if (data === "confirm") {
         const draft = draftByChat.get(chatId);
         if (!draft) {
           await tgSend(chatId, "No tengo borrador. Mándame un gasto primero.");
         } else {
           const expenseId = await insertExpenseToBQ(draft, chatId);
           draftByChat.delete(chatId);
-          await tgSend(chatId, `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`);
+          await tgSend(
+            chatId,
+            `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`
+          );
         }
+        await answerCallbackQuery(cb.id);
+        return;
+      }
+
+      // ✏️ Menú editar
+      if (data === "edit_menu") {
+        await tgSend(chatId, "¿Qué quieres editar?", {
+          reply_markup: editMenuKeyboard()
+        });
+        await answerCallbackQuery(cb.id);
+        return;
+      }
+
+      // ⬅️ Volver al preview
+      if (data === "back_preview") {
+        const draft = draftByChat.get(chatId);
+        if (!draft) {
+          await tgSend(chatId, "No tengo borrador activo.");
+        } else {
+          await tgSend(chatId, preview(draft), {
+            reply_markup: mainKeyboard()
+          });
+        }
+        await answerCallbackQuery(cb.id);
+        return;
       }
 
       await answerCallbackQuery(cb.id);
@@ -54,24 +94,30 @@ app.post("/telegram-webhook", async (req, res) => {
     const text = (msg.text || "").trim();
 
     if (!text) {
-      await tgSend(chatId, '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)');
+      await tgSend(
+        chatId,
+        '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)'
+      );
       return;
     }
 
     const low = text.toLowerCase();
 
     if (low === "ayuda" || low === "/help") {
-      await tgSend(chatId, [
-        "🧾 <b>Envíame un gasto</b>. Ej:",
-        "<code>230 Uber American Express ayer</code>",
-        "",
-        "Luego confirma con botón ✅ o escribe <b>confirmar</b>.",
-        "",
-        "<b>Métodos válidos:</b>",
-        ALLOWED_PAYMENT_METHODS.map(x => `- ${escapeHtml(x)}`).join("\n"),
-        "",
-        "Nota: <b>'Amex'</b> a secas es ambiguo."
-      ].join("\n"));
+      await tgSend(
+        chatId,
+        [
+          "🧾 <b>Envíame un gasto</b>. Ej:",
+          "<code>230 Uber American Express ayer</code>",
+          "",
+          "Luego confirma con botón ✅ o escribe <b>confirmar</b>.",
+          "",
+          "<b>Métodos válidos:</b>",
+          ALLOWED_PAYMENT_METHODS.map((x) => `- ${escapeHtml(x)}`).join("\n"),
+          "",
+          "Nota: <b>'Amex'</b> a secas es ambiguo."
+        ].join("\n")
+      );
       return;
     }
 
@@ -89,12 +135,18 @@ app.post("/telegram-webhook", async (req, res) => {
       }
       const expenseId = await insertExpenseToBQ(draft, chatId);
       draftByChat.delete(chatId);
-      await tgSend(chatId, `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`);
+      await tgSend(
+        chatId,
+        `✅ <b>Guardado</b> en BigQuery.\nID: <code>${escapeHtml(expenseId)}</code>`
+      );
       return;
     }
 
     if (!/\d/.test(text)) {
-      await tgSend(chatId, '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)');
+      await tgSend(
+        chatId,
+        '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)'
+      );
       return;
     }
 
@@ -129,7 +181,6 @@ app.post("/telegram-webhook", async (req, res) => {
 
     draftByChat.set(chatId, draft);
     await tgSend(chatId, preview(draft), { reply_markup: mainKeyboard() });
-
   } catch (e) {
     console.error(e);
   }
