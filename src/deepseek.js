@@ -1,4 +1,3 @@
-// src/deepseek.js
 import { DEEPSEEK_API_KEY, ALLOWED_CATEGORIES } from "./config.js";
 import { getAllowedPaymentMethods } from "./cards.js";
 import { todayISOInTZ } from "./parsing.js";
@@ -25,7 +24,6 @@ function deepSeekSystemInstruction() {
     "- amount_mxn = monto mensual aproximado = msi_total_amount / msi_months (redondea a 2 decimales).",
     "Si detectas MSI pero no viene el número de meses, devuelve error preguntando: ¿a cuántos meses?",
     "",
-    "=== Reglas de fecha ===",
     "Reglas de fecha: si el texto contiene 'hoy' usa Hoy; si contiene 'ayer' usa Hoy - 1 día; si contiene 'antier' o 'anteayer' usa Hoy - 2 días. Esto es obligatorio."
   ].join(" ");
 }
@@ -93,8 +91,8 @@ function round2(n) {
 export async function callDeepSeekParse(text) {
   if (!DEEPSEEK_API_KEY) throw new Error("Missing env var: DEEPSEEK_API_KEY");
 
-  const today = todayISOInTZ(); // CDMX
-  const allowedPaymentMethods = await getAllowedPaymentMethods(); // dinámico (card_rules)
+  const today = todayISOInTZ();
+  const allowedPaymentMethods = await getAllowedPaymentMethods();
 
   const payload = {
     model: "deepseek-chat",
@@ -122,7 +120,7 @@ export async function callDeepSeekParse(text) {
   return extractJsonObject(out);
 }
 
-// ✅ async porque payment methods son dinámicos
+// async porque valida contra lista dinámica
 export async function validateParsedFromAI(obj) {
   if (obj?.error) return { ok: false, error: String(obj.error) };
 
@@ -137,6 +135,8 @@ export async function validateParsedFromAI(obj) {
     purchase_date: String(obj.purchase_date || ""),
     merchant: String(obj.merchant || ""),
     description: String(obj.description || ""),
+
+    // MSI fields
     is_msi: isMsi,
     msi_months: isMsi ? Number(obj.msi_months) : null,
     msi_total_amount: isMsi ? Number(obj.msi_total_amount) : null
