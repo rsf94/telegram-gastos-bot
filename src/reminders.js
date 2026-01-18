@@ -1,6 +1,6 @@
 import { tgSend, escapeHtml } from "./telegram.js";
 import { getActiveCardRules, sumExpensesForCycle } from "./storage/bigquery.js";
-import { todayISOInTZ } from "./parsing.js"; // tu helper CDMX
+import { todayISOInTZ } from "./parsing.js";
 
 // --- Date helpers (robustos contra TZ/DST) ---
 function dateAtNoonUTC(iso) {
@@ -15,8 +15,7 @@ function addDaysISO(iso, days) {
   return isoFromDateUTC(d);
 }
 function lastDayOfMonth(year, month1to12) {
-  // month1to12: 1..12
-  return new Date(Date.UTC(year, month1to12, 0)).getUTCDate(); // day 0 of next month
+  return new Date(Date.UTC(year, month1to12, 0)).getUTCDate();
 }
 function clampDay(year, month1to12, day) {
   return Math.min(day, lastDayOfMonth(year, month1to12));
@@ -27,48 +26,28 @@ function makeISODate(year, month1to12, day) {
   return `${year}-${mm}-${dd}`;
 }
 function weekdayUTC(iso) {
-  // 0=Sun 6=Sat
-  return dateAtNoonUTC(iso).getUTCDay();
+  return dateAtNoonUTC(iso).getUTCDay(); // 0=Sun 6=Sat
 }
 function rollWeekendToMonday(iso) {
   const wd = weekdayUTC(iso);
-  if (wd === 6) return addDaysISO(iso, 2); // Sat -> Mon
-  if (wd === 0) return addDaysISO(iso, 1); // Sun -> Mon
+  if (wd === 6) return addDaysISO(iso, 2);
+  if (wd === 0) return addDaysISO(iso, 1);
   return iso;
 }
 
-// cutoff for current month using cut_day; if month doesn't have that day -> last day.
-function cutDateForMonth(todayISO, cut_day) {
+function ymFromISO(todayISO) {
   const d = dateAtNoonUTC(todayISO);
-  const y = d.getUTCFullYear();
-  const m = d.getUTCMonth() + 1; // 1..12
-  const cd = clampDay(y, m, cut_day);
-  return makeISODate(y, m, cd);
+  return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1 };
 }
-
-function prevMonth(todayISO) {
-  const d = dateAtNoonUTC(todayISO);
-  let y = d.getUTCFullYear();
-  let m = d.getUTCMonth() + 1;
+function prevYM(y, m) {
   m -= 1;
-  if (m === 0) { m = 12; y -= 1; }
+  if (m === 0) return { y: y - 1, m: 12 };
   return { y, m };
 }
 
-function prevCutDate(todayISO, cut_day) {
-  const d = dateAtNoonUTC(todayISO);
-  const y = d.getUTCFullYear();
-  const m = d.getUTCMonth() + 1;
-  const thisCut = makeISODate(y, m, clampDay(y, m, cut_day));
-
-  // si hoy todavía no llega al corte del mes, el corte anterior es el del mes pasado
-  if (todayISO < thisCut) {
-    const pm = prevMonth(todayISO);
-    return makeISODate(pm.y, pm.m, clampDay(pm.y, pm.m, cut_day));
-  }
-  // si hoy ya pasó (o es) el corte, el corte anterior es el del mes pasado también
-  const pm = prevMonth(todayISO);
-  return makeISODate(pm.y, pm.m, clampDay(pm.y, pm.m, cut_day));
+function cutISOForYM(y, m, cut_day) {
+  const cd = clampDay(y, m, cut_day);
+  return makeISODate(y, m, cd);
 }
 
 function formatMoneyMXN(n) {
@@ -77,20 +56,24 @@ function formatMoneyMXN(n) {
 }
 
 export async function runDailyCardReminders() {
-  const todayISO = todayISOInTZ(); // CDMX (tu helper)
+  const todayISO = todayISOInTZ(); // CDMX
 
   const rules = await getActiveCardRules();
-  // rules: [{chat_id, card_name, cut_day, pay_offset_days, roll_weekend_to_monday, active}, ...]
 
-  // Procesa por regla
   for (const r of rules) {
-    const cutISO = cutDateForMonth(todayISO, r.cut_day);
+    const { y, m } = ymFromISO(todayISO);
+
+    // corte del mes actual (clamp a último día si el mes no tiene cut_day)
+    const cutISO = cutISOForYM(y, m, r.cut_day);
 
     // Solo disparamos si HOY es corte
     if (todayISO !== cutISO) continue;
 
+    // corte anterior = corte del mes pasado
+    const { y: py, m: pm } = prevYM(y, m);
+    const prevCutISO = cutISOForYM(py, pm, r.cut_day);
+
     // ciclo: (prevCut + 1) ... cut
-    const prevCutISO = prevCutDate(todayISO, r.cut_day);
     const startISO = addDaysISO(prevCutISO, 1);
     const endISO = cutISO;
 
