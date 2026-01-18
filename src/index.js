@@ -186,5 +186,23 @@ app.post("/telegram-webhook", async (req, res) => {
   }
 });
 
+// ===== CRON: recordatorios (corte/pago) =====
+// Protegido con ?token=...
+app.get("/cron/daily", async (req, res) => {
+  try {
+    const token = String(req.query.token || "");
+    if (!process.env.CRON_TOKEN || token !== process.env.CRON_TOKEN) {
+      return res.status(401).send("unauthorized");
+    }
+
+    // ✅ Por ahora NO manda mensajes
+    // Solo confirma que el cron llegó bien
+    return res.status(200).send("ok");
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("error");
+  }
+});
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`listening on ${PORT}`));
