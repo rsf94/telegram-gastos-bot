@@ -11,6 +11,7 @@ import {
 import { insertExpenseToBQ } from "./storage/bigquery.js";
 import { callDeepSeekParse, validateParsedFromAI } from "./deepseek.js";
 import { naiveParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
+import { runDailyCardReminders } from "./reminders.js";
 
 warnMissingEnv();
 
@@ -187,7 +188,6 @@ app.post("/telegram-webhook", async (req, res) => {
 });
 
 // ===== CRON: recordatorios (corte/pago) =====
-// Protegido con ?token=...
 app.get("/cron/daily", async (req, res) => {
   try {
     const token = String(req.query.token || "");
@@ -195,8 +195,9 @@ app.get("/cron/daily", async (req, res) => {
       return res.status(401).send("unauthorized");
     }
 
-    // ✅ Por ahora NO manda mensajes
-    // Solo confirma que el cron llegó bien
+    // ✅ aquí sí corre el recordatorio real
+    await runDailyCardReminders();
+
     return res.status(200).send("ok");
   } catch (e) {
     console.error(e);
