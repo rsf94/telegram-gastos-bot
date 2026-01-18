@@ -21,6 +21,16 @@ app.use(express.json({ limit: "1mb" }));
 // Draft store (MVP)
 const draftByChat = new Map(); // chatId -> draft
 
+/* =======================
+ * Helpers (para MSI flow)
+ * ======================= */
+function round2(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+function monthStartISO(yyyyMmDd) {
+  return `${String(yyyyMmDd).slice(0, 7)}-01`;
+}
+
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.post("/telegram-webhook", async (req, res) => {
@@ -143,6 +153,32 @@ app.post("/telegram-webhook", async (req, res) => {
       return;
     }
 
+    /* =======================
+     * ✅ MSI step: si estamos esperando meses, aquí lo capturamos
+     * ======================= */
+    const existing = draftByChat.get(chatId);
+    if (existing?.is_msi === true && (!existing.msi_months || existing.msi_months <= 1)) {
+      // acepta "6" o "6 meses" o "6msi"
+      const m = text.match(/(\d{1,2})/);
+      const n = m ? Number(m[1]) : NaN;
+
+      if (!Number.isFinite(n) || n <= 1 || n > 60) {
+        await tgSend(chatId, "Dime solo el número de meses (ej: <code>6</code>, <code>12</code>).");
+        return;
+      }
+
+      existing.msi_months = n;
+      existing.msi_start_month = existing.msi_start_month || monthStartISO(existing.purchase_date);
+
+      // cashflow mensual (redondeo)
+      existing.amount_mxn = round2(Number(existing.msi_total_amount) / n);
+
+      draftByChat.set(chatId, existing);
+      await tgSend(chatId, preview(existing), { reply_markup: mainKeyboard() });
+      return;
+    }
+
+    // si no tiene dígitos, es probable que sea texto casual
     if (!/\d/.test(text)) {
       await tgSend(
         chatId,
@@ -159,6 +195,13 @@ app.post("/telegram-webhook", async (req, res) => {
       const v = await validateParsedFromAI(parsed);
 
       if (!v.ok) {
+        if (v.needs_msi_months && v.draft) {
+          // guarda draft parcial y pide meses
+          draftByChat.set(chatId, { ...v.draft, raw_text: text });
+          await tgSend(chatId, "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (ej: <code>6</code>)");
+          return;
+        }
+
         await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
         return;
       }
