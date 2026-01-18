@@ -1,4 +1,10 @@
-import { DEEPSEEK_API_KEY, ALLOWED_PAYMENT_METHODS, ALLOWED_CATEGORIES } from "./config.js";
+import {
+  DEEPSEEK_API_KEY,
+  ALLOWED_PAYMENT_METHODS,
+  ALLOWED_CATEGORIES
+} from "./config.js";
+
+import { todayISOInTZ } from "./parsing.js";
 
 function deepSeekSystemInstruction() {
   return [
@@ -35,7 +41,10 @@ function deepSeekUserPrompt(text, todayISO) {
       description: "Viaje Uber"
     }),
     "2) Error (si falta info o hay duda):",
-    JSON.stringify({ error: "Explica qué falta o qué es ambiguo y qué debe aclarar el usuario." }),
+    JSON.stringify({
+      error:
+        "Explica qué falta o qué es ambiguo y qué debe aclarar el usuario."
+    }),
     "",
     "Métodos de pago permitidos:",
     ALLOWED_PAYMENT_METHODS.join(" | "),
@@ -54,7 +63,9 @@ function extractJsonObject(text) {
 export async function callDeepSeekParse(text) {
   if (!DEEPSEEK_API_KEY) throw new Error("Missing env var: DEEPSEEK_API_KEY");
 
-  const today = new Date().toISOString().slice(0, 10);
+  // ✅ CDMX: evita bug de UTC (toISOString) que te daba "mañana"
+  const today = todayISOInTZ();
+
   const payload = {
     model: "deepseek-chat",
     temperature: 0.2,
@@ -68,7 +79,7 @@ export async function callDeepSeekParse(text) {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "authorization": `Bearer ${DEEPSEEK_API_KEY}`
+      authorization: `Bearer ${DEEPSEEK_API_KEY}`
     },
     body: JSON.stringify(payload)
   });
@@ -102,11 +113,20 @@ export function validateParsedFromAI(obj) {
   }
 
   if (!ALLOWED_PAYMENT_METHODS.includes(d.payment_method)) {
-    return { ok: false, error: "Método de pago inválido. Usa uno de:\n- " + ALLOWED_PAYMENT_METHODS.join("\n- ") };
+    return {
+      ok: false,
+      error:
+        "Método de pago inválido. Usa uno de:\n- " +
+        ALLOWED_PAYMENT_METHODS.join("\n- ")
+    };
   }
 
   if (!ALLOWED_CATEGORIES.includes(d.category)) {
-    return { ok: false, error: "Categoría inválida. Debe ser una de tu lista (ej. Transport, Groceries, Restaurant)." };
+    return {
+      ok: false,
+      error:
+        "Categoría inválida. Debe ser una de tu lista (ej. Transport, Groceries, Restaurant)."
+    };
   }
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d.purchase_date)) {
