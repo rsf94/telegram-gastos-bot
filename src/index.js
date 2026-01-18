@@ -8,7 +8,7 @@ import {
   answerCallbackQuery,
   escapeHtml
 } from "./telegram.js";
-import { insertExpenseToBQ } from "./storage/bigquery.js";
+import { insertExpenseAndMaybeInstallments } from "./storage/bigquery.js";
 import { callDeepSeekParse, validateParsedFromAI } from "./deepseek.js";
 import { naiveParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
 import { runDailyCardReminders } from "./reminders.js";
@@ -49,7 +49,7 @@ app.post("/telegram-webhook", async (req, res) => {
         if (!draft) {
           await tgSend(chatId, "No tengo borrador. Mándame un gasto primero.");
         } else {
-          const expenseId = await insertExpenseToBQ(draft, chatId);
+          const expenseId = await insertExpenseAndMaybeInstallments(draft, chatId);
           draftByChat.delete(chatId);
           await tgSend(
             chatId,
@@ -134,7 +134,7 @@ app.post("/telegram-webhook", async (req, res) => {
         await tgSend(chatId, "No tengo borrador. Mándame un gasto primero.");
         return;
       }
-      const expenseId = await insertExpenseToBQ(draft, chatId);
+      const expenseId = await insertExpenseAndMaybeInstallments(draft, chatId);
       draftByChat.delete(chatId);
       await tgSend(
         chatId,
