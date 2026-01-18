@@ -195,8 +195,8 @@ app.get("/cron/daily", async (req, res) => {
       return res.status(401).send("unauthorized");
     }
 
-    // ✅ aquí sí corre el recordatorio real
-    await runDailyCardReminders();
+    const force = String(req.query.force || "") === "1";
+    await runDailyCardReminders({ force });
 
     return res.status(200).send("ok");
   } catch (e) {
