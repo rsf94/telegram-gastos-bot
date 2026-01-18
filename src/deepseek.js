@@ -169,9 +169,30 @@ export async function validateParsedFromAI(obj) {
     msi_start_month: isMsi ? String(obj.msi_start_month || "") : null
   };
 
-  if (!isFinite(d.amount_mxn) || d.amount_mxn <= 0) {
-    return { ok: false, error: "Monto inválido. Ej: 230 Uber Banorte Platino ayer" };
+if (d.is_msi) {
+  // total amount siempre debe existir
+  if (!isFinite(d.msi_total_amount) || d.msi_total_amount <= 0) {
+    d.msi_total_amount = originalAmount; // el monto que escribió el user
   }
+
+  // si no viene meses, NO error genérico: devuelve un "needs_months"
+  if (!isFinite(d.msi_months) || d.msi_months <= 1) {
+    // default msi_start_month al mes de la compra
+    d.msi_start_month = monthStartISO(d.purchase_date);
+    return { ok: false, needs_msi_months: true, draft: d };
+  }
+
+  // si sí vienen meses, ya puedes normalizar
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.msi_start_month)) {
+    d.msi_start_month = monthStartISO(d.purchase_date);
+  }
+
+  // OJO: aquí aún NO dividas si quieres que el cashflow lo genere installments
+  // pero si vas a mantener amount_mxn como “mensual”, entonces sí:
+  d.amount_mxn = round2(d.msi_total_amount / d.msi_months);
+
+  return { ok: true, draft: d };
+}
 
   if (d.payment_method.toLowerCase() === "amex") {
     return {
