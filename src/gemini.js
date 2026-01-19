@@ -1,5 +1,6 @@
 import {
   GEMINI_API_KEY,
+  GEMINI_MODEL,
   DEEPSEEK_API_KEY,
   LLM_PROVIDER,
   LLM_FALLBACK,
@@ -83,14 +84,17 @@ function normalizeCompletion(obj) {
 async function requestGemini(prompt, { timeoutMs }) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const model = GEMINI_MODEL || "gemini-3-flash-preview";
 
   try {
     const res = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent" +
-        `?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": GEMINI_API_KEY
+        },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.2 }
@@ -101,7 +105,11 @@ async function requestGemini(prompt, { timeoutMs }) {
 
     const bodyText = await res.text();
     if (!res.ok) {
-      throw new Error(`Gemini HTTP ${res.status}: ${bodyText}`);
+      const trimmedBody = bodyText.slice(0, 2000);
+      console.warn(
+        `Gemini error response model=${model} HTTP ${res.status}: ${trimmedBody}`
+      );
+      throw new Error(`Gemini HTTP ${res.status} model=${model}`);
     }
 
     const data = JSON.parse(bodyText);
