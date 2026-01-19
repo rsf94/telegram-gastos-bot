@@ -86,24 +86,28 @@ Para verlos en Cloud Run, filtra por `type=perf` en los logs.
 
 ## ✅ Casos de prueba manual
 
-1) **Normal (sin MSI)**  
-   Input: `230 Uber American Express ayer`  
-   Esperado: preview con fecha de ayer, método American Express, monto 230, sin MSI.
+1) **Parsing completo + categoría vía LLM**  
+   Input: `935.26 en la comercial mexicana con Amex Aeromexico`  
+   Esperado: monto 935.26, método Amex Aeromexico, fecha hoy, descripción "en la comercial mexicana", categoría por LLM (ideal: Groceries).
 
 2) **MSI paso 1**  
-   Input: `gasolina 1200 BBVA Platino a MSI`  
-   Esperado: pide meses, no llama LLM si detecta monto + tarjeta + fecha.
+   Input: `gasolina 100 BBVA Platino a MSI`  
+   Esperado: pide meses; se guarda monto total 100 y espera respuesta.
 
 3) **MSI paso 2**  
-   Input: `6` (después del paso 1)  
-   Esperado: preview MSI con mensualidad, sin llamada LLM.
+   Input: `5` (después del paso 1)  
+   Esperado: mensualidad 20, meses 5, sin llamada LLM.
 
-4) **Fecha explícita**  
-   Input: `85 Starbucks Rappi Card 2026-01-15`  
-   Esperado: fecha 2026-01-15 en preview.
+4) **Fecha relativa**  
+   Input: `230 uber banorte platino ayer`  
+   Esperado: categoría por LLM (ideal: Transport), fecha de ayer.
 
-5) **Método inválido**  
-   Input: `100 tacos Amex hoy`  
+5) **Fecha explícita**  
+   Input: `1200 amazon 2026-01-05 american express`  
+   Esperado: fecha 2026-01-05, categoría por LLM (ideal: E-commerce).
+
+6) **Método ambiguo**  
+   Input: `230 amex ayer`  
    Esperado: error indicando que "Amex" es ambiguo.
 
 ## 🗃️ Schema sugerido en BigQuery
