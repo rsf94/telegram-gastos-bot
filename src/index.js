@@ -11,17 +11,13 @@ import {
 } from "./telegram.js";
 import { insertExpenseAndMaybeInstallments } from "./storage/bigquery.js";
 import {
-  callDeepSeekCategory,
-  validateCategoryFromAI
+  callDeepSeekParse,
+  callDeepSeekComplete,
+  validateParsedFromAI,
+  validateCompletionFromAI
 } from "./deepseek.js";
 import { getAllowedPaymentMethods } from "./cards.js";
-import {
-  localParse,
-  validateDraft,
-  overrideRelativeDate,
-  preview,
-  todayISOInTZ
-} from "./parsing.js";
+import { localParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
 import { runDailyCardReminders } from "./reminders.js";
 
 warnMissingEnv();
@@ -103,6 +99,17 @@ function recordDuration(start, target, key) {
   const elapsed = Date.now() - start;
   target[key] += elapsed;
   return elapsed;
+}
+
+function shouldCallCompletion(draft) {
+  const text = draft?.__local?.descriptionText || draft?.description || "";
+  const words = String(text)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const hasUsefulDescription = words.length >= 2;
+  const complex = words.length >= 6;
+  return !hasUsefulDescription || complex;
 }
 
 /* =======================
@@ -302,7 +309,7 @@ app.post("/telegram-webhook", async (req, res) => {
     // =========================
     if (wantsMsi) {
       let draft = null;
-      // Parsing local para MSI.
+      // Local-first parsing para evitar latencia de LLM.
       const localStart = Date.now();
       const localDraft = localParse(text, allowedMethods);
       recordDuration(localStart, perf, "local_parse_ms");
@@ -311,11 +318,39 @@ app.post("/telegram-webhook", async (req, res) => {
       if (!localErr) {
         draft = localDraft;
       } else {
-        await tgSend(chatId, localErr);
-        return;
+        // 1) intentar IA
+        const llmStart = Date.now();
+        perf.llm_calls += 1;
+        try {
+          const parsed = await callDeepSeekParse(text);
+          const v = await validateParsedFromAI(parsed);
+
+          if (v.ok) {
+            draft = v.draft;
+          } else {
+            // si el AI ya detectó MSI sin meses y nos dio draft parcial
+            if (v.needs_msi_months && v.draft) {
+              draft = v.draft;
+            }
+          }
+        } catch (e) {
+          draft = null;
+        } finally {
+          recordDuration(llmStart, perf, "llm_ms");
+        }
       }
 
-      // fija MSI incompleto
+      // 2) fallback local si no hay draft usable
+      if (!draft) {
+        draft = localDraft;
+        const err = validateDraft(draft, allowedMethods);
+        if (err) {
+          await tgSend(chatId, err);
+          return;
+        }
+      }
+
+      // 3) fija MSI incompleto
       draft.raw_text = text;
       draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
 
@@ -348,7 +383,7 @@ app.post("/telegram-webhook", async (req, res) => {
     }
 
     let draft;
-    // Parseo local determinístico.
+    // Local-first parsing para reducir llamadas LLM.
     const localStart = Date.now();
     const localDraft = localParse(text, allowedMethods);
     recordDuration(localStart, perf, "local_parse_ms");
@@ -358,22 +393,58 @@ app.post("/telegram-webhook", async (req, res) => {
       draft = localDraft;
       draft.raw_text = text;
       draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-    } else {
-      await tgSend(chatId, localErr);
-      return;
-    }
 
-    const llmStart = Date.now();
-    perf.llm_calls += 1;
-    try {
-      const todayISO = todayISOInTZ();
-      const completion = await callDeepSeekCategory(text, todayISO);
-      const result = validateCategoryFromAI(completion);
-      draft.category = result.ok ? result.category : "Other";
-    } catch (e) {
-      draft.category = "Other";
-    } finally {
-      recordDuration(llmStart, perf, "llm_ms");
+      if (shouldCallCompletion(draft)) {
+        const llmStart = Date.now();
+        perf.llm_calls += 1;
+        try {
+          const completion = await callDeepSeekComplete(text, {
+            amount_mxn: draft.amount_mxn,
+            payment_method: draft.payment_method,
+            purchase_date: draft.purchase_date
+          });
+          const completed = validateCompletionFromAI(completion);
+          draft.category = completed.category;
+          draft.merchant = completed.merchant;
+          draft.description = completed.description;
+        } catch (e) {
+          draft.category = "Other";
+          draft.merchant = "";
+          if (!draft.description) draft.description = "Gasto";
+        } finally {
+          recordDuration(llmStart, perf, "llm_ms");
+        }
+      }
+    } else {
+      const llmStart = Date.now();
+      perf.llm_calls += 1;
+      try {
+        const parsed = await callDeepSeekParse(text);
+        const v = await validateParsedFromAI(parsed);
+
+        if (!v.ok) {
+          await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
+          return;
+        }
+
+        draft = v.draft;
+        draft.raw_text = text;
+        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+      } catch (e) {
+        console.error("DeepSeek parse failed, fallback local:", e);
+
+        draft = localDraft;
+        draft.raw_text = text;
+        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+
+        const err = validateDraft(draft, allowedMethods);
+        if (err) {
+          await tgSend(chatId, err);
+          return;
+        }
+      } finally {
+        recordDuration(llmStart, perf, "llm_ms");
+      }
     }
 
     // asegúrate que NO sea MSI
