@@ -10,13 +10,12 @@ import {
   escapeHtml
 } from "./telegram.js";
 import { insertExpenseAndMaybeInstallments } from "./storage/bigquery.js";
-import { callDeepSeekEnrich, validateDeepSeekEnrich } from "./deepseek.js";
+import { enrichExpenseLLM } from "./gemini.js";
 import {
   localParseExpense,
   naiveParse,
   validateDraft,
   overrideRelativeDate,
-  cleanTextForDescription,
   preview
 } from "./parsing.js";
 import { runDailyCardReminders } from "./reminders.js";
@@ -84,18 +83,6 @@ function logBigQueryError(e) {
   } catch (_) {
     // ignore
   }
-}
-
-let deepSeekCalls = 0;
-
-function buildEnrichFallback(text, draft) {
-  const amountToken = draft.__meta?.amount_tokens?.[0] || "";
-  const cleaned = cleanTextForDescription(text, amountToken, draft.payment_method);
-  return {
-    category: "Other",
-    merchant: null,
-    description: cleaned || "Gasto"
-  };
 }
 
 /* =======================
@@ -319,42 +306,10 @@ app.post("/telegram-webhook", async (req, res) => {
       return;
     }
 
-    let enrichError = null;
-    try {
-      const aiStart = Date.now();
-      deepSeekCalls += 1;
-      const fixedFields = {
-        amount_mxn: draft.amount_mxn,
-        payment_method: draft.payment_method,
-        purchase_date: draft.purchase_date
-      };
-      const ai = await callDeepSeekEnrich(text, fixedFields, ALLOWED_CATEGORIES);
-      const deepSeekMs = Date.now() - aiStart;
-      console.info(`🤖 deepseek=${deepSeekMs}ms calls=${deepSeekCalls}`);
-
-      const allowedMethods = ALLOWED_PAYMENT_METHODS;
-      const validation = await validateDeepSeekEnrich(ai, {
-        allowedCategories: ALLOWED_CATEGORIES,
-        allowedPaymentMethods: allowedMethods
-      });
-      if (validation.ok) {
-        draft.category = validation.draft.category;
-        draft.merchant = validation.draft.merchant;
-        draft.description = validation.draft.description;
-      } else {
-        enrichError = validation.error;
-      }
-    } catch (e) {
-      enrichError = e?.message || String(e);
-    }
-
-    if (enrichError) {
-      console.warn("DeepSeek enrich failed, usando fallback mínimo:", enrichError);
-      const fallback = buildEnrichFallback(text, draft);
-      draft.category = fallback.category;
-      draft.merchant = fallback.merchant;
-      draft.description = fallback.description;
-    }
+    const ai = await enrichExpenseLLM({ text, baseDraft: draft });
+    draft.category = ai.category;
+    draft.merchant = ai.merchant;
+    draft.description = ai.description;
 
     // =========================
     // FLUJO B: MSI (step 1)

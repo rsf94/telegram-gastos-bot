@@ -1,5 +1,8 @@
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+export const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 export const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+export const LLM_PROVIDER = process.env.LLM_PROVIDER || "gemini";
+export const LLM_FALLBACK = process.env.LLM_FALLBACK;
 
 export const BQ_PROJECT_ID = process.env.BQ_PROJECT_ID || "project-c9256c63-847c-4b18-ac8";
 export const BQ_DATASET = process.env.BQ_DATASET || "gastos";
@@ -30,5 +33,10 @@ export const ALLOWED_CATEGORIES = [
 
 export function warnMissingEnv() {
   if (!TELEGRAM_BOT_TOKEN) console.warn("Missing env var: TELEGRAM_BOT_TOKEN");
-  if (!DEEPSEEK_API_KEY) console.warn("Missing env var: DEEPSEEK_API_KEY (DeepSeek parse will fail and fallback to naive)");
+  if (!GEMINI_API_KEY) {
+    console.warn("Missing env var: GEMINI_API_KEY (Gemini completion will fallback)");
+  }
+  if (LLM_PROVIDER === "gemini" && LLM_FALLBACK === "deepseek" && !DEEPSEEK_API_KEY) {
+    console.warn("Missing env var: DEEPSEEK_API_KEY (DeepSeek fallback unavailable)");
+  }
 }
