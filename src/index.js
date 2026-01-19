@@ -1,7 +1,7 @@
 // index.js
 import express from "express";
 
-import { warnMissingEnv, ALLOWED_PAYMENT_METHODS } from "./config.js";
+import { warnMissingEnv } from "./config.js";
 import {
   tgSend,
   mainKeyboard,
@@ -10,8 +10,14 @@ import {
   escapeHtml
 } from "./telegram.js";
 import { insertExpenseAndMaybeInstallments } from "./storage/bigquery.js";
-import { callDeepSeekParse, validateParsedFromAI } from "./deepseek.js";
-import { naiveParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
+import {
+  callDeepSeekParse,
+  callDeepSeekComplete,
+  validateParsedFromAI,
+  validateCompletionFromAI
+} from "./deepseek.js";
+import { getAllowedPaymentMethods } from "./cards.js";
+import { localParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
 import { runDailyCardReminders } from "./reminders.js";
 
 warnMissingEnv();
@@ -21,6 +27,7 @@ app.use(express.json({ limit: "1mb" }));
 
 // Draft store (MVP)
 const draftByChat = new Map(); // chatId -> draft
+const LOG_PERF = String(process.env.LOG_PERF || "true") !== "false";
 
 /* =======================
  * Helpers
@@ -79,6 +86,32 @@ function logBigQueryError(e) {
   }
 }
 
+function logPerf(payload) {
+  if (!LOG_PERF) return;
+  console.log(JSON.stringify({ type: "perf", ...payload }));
+}
+
+function getPerfInit() {
+  return { local_parse_ms: 0, llm_ms: 0, llm_calls: 0 };
+}
+
+function recordDuration(start, target, key) {
+  const elapsed = Date.now() - start;
+  target[key] += elapsed;
+  return elapsed;
+}
+
+function shouldCallCompletion(draft) {
+  const text = draft?.__local?.descriptionText || draft?.description || "";
+  const words = String(text)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const hasUsefulDescription = words.length >= 2;
+  const complex = words.length >= 6;
+  return !hasUsefulDescription || complex;
+}
+
 /* =======================
  * Routes
  * ======================= */
@@ -86,6 +119,9 @@ app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.post("/telegram-webhook", async (req, res) => {
   res.status(200).send("ok");
+
+  const requestStart = Date.now();
+  const perf = getPerfInit();
 
   try {
     const update = req.body;
@@ -165,6 +201,7 @@ app.post("/telegram-webhook", async (req, res) => {
 
     const chatId = String(msg.chat.id);
     const text = (msg.text || "").trim();
+    const allowedMethods = await getAllowedPaymentMethods();
 
     if (!text) {
       await tgSend(
@@ -190,7 +227,7 @@ app.post("/telegram-webhook", async (req, res) => {
           "Luego confirma con botón ✅ o escribe <b>confirmar</b>.",
           "",
           "<b>Métodos válidos:</b>",
-          ALLOWED_PAYMENT_METHODS.map((x) => `- ${escapeHtml(x)}`).join("\n"),
+          allowedMethods.map((x) => `- ${escapeHtml(x)}`).join("\n"),
           "",
           "Nota: <b>'Amex'</b> a secas es ambiguo."
         ].join("\n")
@@ -272,29 +309,41 @@ app.post("/telegram-webhook", async (req, res) => {
     // =========================
     if (wantsMsi) {
       let draft = null;
+      // Local-first parsing para evitar latencia de LLM.
+      const localStart = Date.now();
+      const localDraft = localParse(text, allowedMethods);
+      recordDuration(localStart, perf, "local_parse_ms");
 
-      // 1) intentar IA
-      try {
-        const parsed = await callDeepSeekParse(text);
-        const v = await validateParsedFromAI(parsed);
+      const localErr = validateDraft(localDraft, allowedMethods);
+      if (!localErr) {
+        draft = localDraft;
+      } else {
+        // 1) intentar IA
+        const llmStart = Date.now();
+        perf.llm_calls += 1;
+        try {
+          const parsed = await callDeepSeekParse(text);
+          const v = await validateParsedFromAI(parsed);
 
-        if (v.ok) {
-          draft = v.draft;
-        } else {
-          // si el AI ya detectó MSI sin meses y nos dio draft parcial
-          if (v.needs_msi_months && v.draft) {
+          if (v.ok) {
             draft = v.draft;
+          } else {
+            // si el AI ya detectó MSI sin meses y nos dio draft parcial
+            if (v.needs_msi_months && v.draft) {
+              draft = v.draft;
+            }
           }
+        } catch (e) {
+          draft = null;
+        } finally {
+          recordDuration(llmStart, perf, "llm_ms");
         }
-      } catch (e) {
-        draft = null;
       }
 
-      // 2) fallback naive si no hay draft usable
+      // 2) fallback local si no hay draft usable
       if (!draft) {
-        draft = naiveParse(text);
-        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-        const err = validateDraft(draft);
+        draft = localDraft;
+        const err = validateDraft(draft, allowedMethods);
         if (err) {
           await tgSend(chatId, err);
           return;
@@ -334,29 +383,67 @@ app.post("/telegram-webhook", async (req, res) => {
     }
 
     let draft;
-    try {
-      const parsed = await callDeepSeekParse(text);
-      const v = await validateParsedFromAI(parsed);
+    // Local-first parsing para reducir llamadas LLM.
+    const localStart = Date.now();
+    const localDraft = localParse(text, allowedMethods);
+    recordDuration(localStart, perf, "local_parse_ms");
 
-      if (!v.ok) {
-        await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
-        return;
+    const localErr = validateDraft(localDraft, allowedMethods);
+    if (!localErr) {
+      draft = localDraft;
+      draft.raw_text = text;
+      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+
+      if (shouldCallCompletion(draft)) {
+        const llmStart = Date.now();
+        perf.llm_calls += 1;
+        try {
+          const completion = await callDeepSeekComplete(text, {
+            amount_mxn: draft.amount_mxn,
+            payment_method: draft.payment_method,
+            purchase_date: draft.purchase_date
+          });
+          const completed = validateCompletionFromAI(completion);
+          draft.category = completed.category;
+          draft.merchant = completed.merchant;
+          draft.description = completed.description;
+        } catch (e) {
+          draft.category = "Other";
+          draft.merchant = "";
+          if (!draft.description) draft.description = "Gasto";
+        } finally {
+          recordDuration(llmStart, perf, "llm_ms");
+        }
       }
+    } else {
+      const llmStart = Date.now();
+      perf.llm_calls += 1;
+      try {
+        const parsed = await callDeepSeekParse(text);
+        const v = await validateParsedFromAI(parsed);
 
-      draft = v.draft;
-      draft.raw_text = text;
-      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-    } catch (e) {
-      console.error("DeepSeek parse failed, fallback naive:", e);
+        if (!v.ok) {
+          await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
+          return;
+        }
 
-      draft = naiveParse(text);
-      draft.raw_text = text;
-      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+        draft = v.draft;
+        draft.raw_text = text;
+        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+      } catch (e) {
+        console.error("DeepSeek parse failed, fallback local:", e);
 
-      const err = validateDraft(draft);
-      if (err) {
-        await tgSend(chatId, err);
-        return;
+        draft = localDraft;
+        draft.raw_text = text;
+        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+
+        const err = validateDraft(draft, allowedMethods);
+        if (err) {
+          await tgSend(chatId, err);
+          return;
+        }
+      } finally {
+        recordDuration(llmStart, perf, "llm_ms");
       }
     }
 
@@ -370,6 +457,15 @@ app.post("/telegram-webhook", async (req, res) => {
     await tgSend(chatId, preview(draft), { reply_markup: mainKeyboard() });
   } catch (e) {
     console.error(e);
+  } finally {
+    const totalMs = Date.now() - requestStart;
+    logPerf({
+      route: "/telegram-webhook",
+      total_ms: totalMs,
+      local_parse_ms: perf.local_parse_ms,
+      llm_ms: perf.llm_ms,
+      llm_calls: perf.llm_calls
+    });
   }
 });
 
