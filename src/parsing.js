@@ -126,17 +126,17 @@ export function naiveParse(text) {
  * ======================= */
 function extractFirstAmount(text) {
   const match = String(text || "").match(
-    /\$?\s*(\d{1,3}(?:[\s,]\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?)(?:\s*(?:mxn|pesos))?/i
+    /(\d{1,3}(?:[\s,]\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?)/
   );
-  if (!match) return { amount: NaN, raw: "" };
+  if (!match) return NaN;
   const raw = match[1].replace(/\s/g, "");
   if (raw.includes(",") && raw.includes(".")) {
-    return { amount: Number(raw.replace(/,/g, "")), raw: match[0] };
+    return Number(raw.replace(/,/g, ""));
   }
   if (raw.includes(",")) {
-    return { amount: Number(raw.replace(",", ".")), raw: match[0] };
+    return Number(raw.replace(",", "."));
   }
-  return { amount: Number(raw), raw: match[0] };
+  return Number(raw);
 }
 
 function findPaymentMethod(text, allowedMethods) {
@@ -165,7 +165,7 @@ function stripNoise(text, parts) {
 }
 
 export function localParse(text, allowedMethods = ALLOWED_PAYMENT_METHODS) {
-  const { amount, raw } = extractFirstAmount(text);
+  const amount = extractFirstAmount(text);
   const payment_method = findPaymentMethod(text, allowedMethods);
   const today = todayISOInTZ();
   const explicitDate = extractExplicitDate(text);
@@ -174,9 +174,11 @@ export function localParse(text, allowedMethods = ALLOWED_PAYMENT_METHODS) {
   const lower = String(text || "").toLowerCase();
   const is_msi = /\bmsi\b|\bmeses\s+sin\s+intereses\b/.test(lower);
 
-  const cleaned = stripNoise(text, [explicitDate, payment_method, raw])
-    .replace(/\bpesos\b/gi, " ")
-    .trim();
+  const cleaned = stripNoise(text, [
+    explicitDate,
+    payment_method,
+    String(amount)
+  ]);
 
   return {
     amount_mxn: amount,
