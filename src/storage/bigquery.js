@@ -24,16 +24,6 @@ function money2(n) {
   return round2(x).toFixed(2);
 }
 
-function normalizeDateISO(value) {
-  if (!value) return null;
-  if (typeof value === "string") return value;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  if (typeof value === "object" && typeof value.value === "string") {
-    return value.value;
-  }
-  return String(value);
-}
-
 /* =======================
  * Insertar gasto SIMPLE (legacy / no MSI schedule)
  * ======================= */
@@ -219,7 +209,7 @@ export async function getBillingMonthForPurchase({ chatId, cardName, purchaseDat
   const [rows] = await job.getQueryResults();
   const bm = rows?.[0]?.billing_month;
   if (!bm) throw new Error(`No billing_month found for ${cardName} ${purchaseDateISO}`);
-  return normalizeDateISO(bm); // 'YYYY-MM-01'
+  return String(bm); // 'YYYY-MM-01'
 }
 
 /* =======================
@@ -279,7 +269,7 @@ export async function createInstallmentsForExpense({
     expense_id: String(expenseId),
     chat_id: String(chatId),
     card_name: String(cardName),
-    billing_month: normalizeDateISO(addMonthsYYYYMM01(billingMonthISO, i)), // YYYY-MM-01
+    billing_month: addMonthsYYYYMM01(billingMonthISO, i), // YYYY-MM-01
     installment_number: i + 1,
     months_total: Number(monthsTotal),
     amount_mxn: money2(amt), // ✅ NUMERIC como string
@@ -332,7 +322,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
   const row = {
     id: String(expenseId),
     created_at: new Date().toISOString(),
-    purchase_date: normalizeDateISO(draft.purchase_date),
+    purchase_date: draft.purchase_date,
     amount_mxn: isMsi ? money2(monthlyAmount) : money2(draft.amount_mxn),
     payment_method: draft.payment_method,
     category: draft.category || "Other",
@@ -344,7 +334,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
 
     is_msi: isMsi,
     msi_months: isMsi ? msiMonths : null,
-    msi_start_month: isMsi ? normalizeDateISO(billingMonthISO) : null, // primer billing month (mes B)
+    msi_start_month: isMsi ? billingMonthISO : null, // primer billing month (mes B)
     msi_total_amount: isMsi ? money2(msiTotal) : null
   };
 
