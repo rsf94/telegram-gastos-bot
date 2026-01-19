@@ -115,6 +115,13 @@ function cleanDescription(text, tokensToRemove) {
   return result.replace(/\s+/g, " ").trim();
 }
 
+export function cleanTextForDescription(text, amountToken, paymentMethod) {
+  const tokensToRemove = [];
+  if (amountToken) tokensToRemove.push(amountToken);
+  if (paymentMethod) tokensToRemove.push(paymentMethod);
+  return cleanDescription(text, tokensToRemove);
+}
+
 export function localParseExpense(text) {
   const raw = String(text || "");
   const lower = raw.toLowerCase();
@@ -147,18 +154,13 @@ export function localParseExpense(text) {
 
   const msi_total_amount = is_msi && Number.isFinite(amount_mxn) ? amount_mxn : null;
 
-  const description = cleanDescription(raw, [payment_method, ...amountTokens]);
-  const merchant = description
-    ? description.split(/\s+/).slice(0, 2).join(" ")
-    : "";
-
   return {
     amount_mxn,
     payment_method,
     category: "Other",
     purchase_date,
-    merchant,
-    description: description || "Gasto",
+    merchant: "",
+    description: "",
 
     is_msi,
     msi_months,
@@ -167,6 +169,7 @@ export function localParseExpense(text) {
     amex_ambiguous,
 
     __meta: {
+      amount_tokens: amountTokens,
       amounts_found: amounts.length,
       has_multiple_amounts: amounts.length > 1
     }
@@ -180,6 +183,8 @@ export function localParseExpense(text) {
 export function naiveParse(text) {
   const m = text.match(/(\d+(\.\d+)?)/);
   const amount = m ? Number(m[1]) : NaN;
+
+  const amex_ambiguous = /\bamex\b/.test(String(text || "").toLowerCase());
 
   const pm =
     ALLOWED_PAYMENT_METHODS.find((x) =>
@@ -218,12 +223,18 @@ export function naiveParse(text) {
     purchase_date: d || today,
     merchant: "",
     description: desc || "Gasto",
+    amex_ambiguous,
 
     // MSI fields
     is_msi,
     msi_months,
     msi_total_amount,
-    msi_start_month: is_msi ? monthStartISO(d || today) : null
+    msi_start_month: is_msi ? monthStartISO(d || today) : null,
+    __meta: {
+      amount_tokens: m ? [m[1]] : [],
+      amounts_found: m ? 1 : 0,
+      has_multiple_amounts: false
+    }
   };
 }
 
@@ -252,9 +263,15 @@ export function validateDraft(d) {
   }
 
   if (!d.payment_method) {
-    if ((d.description || "").toLowerCase().includes("amex")) {
+    if (d.amex_ambiguous || (d.description || "").toLowerCase().includes("amex")) {
       return "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico.";
     }
+    return (
+      "❌ Método de pago inválido. Usa uno de:\n- " +
+      ALLOWED_PAYMENT_METHODS.join("\n- ")
+    );
+  }
+  if (!ALLOWED_PAYMENT_METHODS.includes(d.payment_method)) {
     return (
       "❌ Método de pago inválido. Usa uno de:\n- " +
       ALLOWED_PAYMENT_METHODS.join("\n- ")

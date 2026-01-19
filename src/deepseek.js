@@ -155,6 +155,46 @@ function deepSeekCompletionUserPrompt(text, todayISO, allowedPaymentMethods, bas
   ].join("\n");
 }
 
+function deepSeekEnrichSystemInstruction() {
+  return [
+    "Eres un asistente para enriquecer gastos con category, merchant y description.",
+    "Devuelve UNICAMENTE JSON válido (sin backticks, sin texto extra).",
+    "NO modifiques amount_mxn, payment_method ni purchase_date (son fijos).",
+    "Si falta contexto o hay ambigüedad, devuelve JSON con {\"error\":\"...\"}.",
+    "",
+    "category debe ser EXACTAMENTE una de la lista permitida.",
+    "merchant debe ser un nombre corto y limpio (ej. 'Uber', 'Liverpool', 'Amazon').",
+    "description debe ser corta y útil (ej. 'Camisa', 'Gasolina', 'Sushi')."
+  ].join(" ");
+}
+
+function deepSeekEnrichUserPrompt(text, fixedFields, allowedCategories) {
+  return [
+    "Enriquece el gasto usando el texto del usuario.",
+    "",
+    "Texto del usuario:",
+    text,
+    "",
+    "Campos fijos (NO cambies estos valores):",
+    JSON.stringify(fixedFields),
+    "",
+    "Devuelve SOLO JSON con una de estas dos formas:",
+    "",
+    JSON.stringify({
+      category: "Clothing",
+      merchant: "Liverpool",
+      description: "Camisa"
+    }),
+    "",
+    JSON.stringify({
+      error: "Explica qué falta o por qué es ambiguo."
+    }),
+    "",
+    "Categorías permitidas:",
+    allowedCategories.join(" | ")
+  ].join("\n");
+}
+
 /* =======================
  * Llamada a DeepSeek
  * ======================= */
@@ -223,6 +263,61 @@ export async function callDeepSeekComplete(text, base) {
   const data = JSON.parse(bodyText);
   const out = data?.choices?.[0]?.message?.content || "";
   return extractJsonObject(out);
+}
+
+export async function callDeepSeekEnrich(
+  text,
+  fixedFields,
+  allowedCategories = ALLOWED_CATEGORIES,
+  { timeoutMs = 15000, retries = 1 } = {}
+) {
+  if (!DEEPSEEK_API_KEY) throw new Error("Missing env var: DEEPSEEK_API_KEY");
+
+  async function runOnce() {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const payload = {
+        model: "deepseek-chat",
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: deepSeekEnrichSystemInstruction() },
+          {
+            role: "user",
+            content: deepSeekEnrichUserPrompt(text, fixedFields, allowedCategories)
+          }
+        ]
+      };
+
+      const res = await fetch("https://api.deepseek.com/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${DEEPSEEK_API_KEY}`
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      const bodyText = await res.text();
+      if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}: ${bodyText}`);
+
+      const data = JSON.parse(bodyText);
+      const out = data?.choices?.[0]?.message?.content || "";
+      return extractJsonObject(out);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  try {
+    return await runOnce();
+  } catch (error) {
+    if (retries > 0) {
+      return runOnce();
+    }
+    throw error;
+  }
 }
 
 /* =======================
@@ -309,4 +404,47 @@ export async function validateParsedFromAI(obj) {
   d.msi_start_month = null;
 
   return { ok: true, draft: d };
+}
+
+export async function validateDeepSeekEnrich(
+  obj,
+  { allowedCategories = ALLOWED_CATEGORIES, allowedPaymentMethods } = {}
+) {
+  if (!obj || typeof obj !== "object") {
+    return { ok: false, error: "Respuesta inválida del modelo." };
+  }
+  if (obj.error) return { ok: false, error: String(obj.error) };
+
+  const category = String(obj.category || "").trim();
+  const merchantRaw = obj.merchant == null ? "" : String(obj.merchant).trim();
+  const descriptionRaw = obj.description == null ? "" : String(obj.description).trim();
+
+  if (!allowedCategories.includes(category)) {
+    return {
+      ok: false,
+      error: "Categoría inválida. Debe ser una de la lista permitida."
+    };
+  }
+
+  if (!descriptionRaw) {
+    return { ok: false, error: "Descripción inválida o vacía." };
+  }
+
+  if (merchantRaw && merchantRaw.length > 80) {
+    return { ok: false, error: "Merchant inválido o demasiado largo." };
+  }
+
+  let merchant = merchantRaw || null;
+  if (merchant && allowedPaymentMethods?.includes(merchant)) {
+    merchant = null;
+  }
+
+  return {
+    ok: true,
+    draft: {
+      category,
+      merchant,
+      description: descriptionRaw
+    }
+  };
 }
