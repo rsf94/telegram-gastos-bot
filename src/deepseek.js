@@ -106,55 +106,6 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
   ].join("\n");
 }
 
-function deepSeekCompletionSystemInstruction() {
-  return [
-    "Eres un asistente para completar datos de gastos.",
-    "Devuelve UNICAMENTE JSON válido (sin backticks, sin texto extra).",
-    "Completa SOLO los campos faltantes (null/vacíos).",
-    "NO cambies valores ya provistos.",
-    "Si falta un dato crítico o hay ambigüedad, devuelve JSON con {\"error\":\"...\"}.",
-    "",
-    "payment_method debe ser EXACTAMENTE uno de la lista permitida.",
-    "category debe ser EXACTAMENTE una de la lista permitida.",
-    "purchase_date debe ser YYYY-MM-DD.",
-    "",
-    "Si el usuario escribe 'Amex', es ambiguo: debe ser 'American Express' o 'Amex Aeromexico' → error.",
-    "",
-    "merchant debe ser un nombre corto y limpio.",
-    "description debe ser corta y útil."
-  ].join(" ");
-}
-
-function deepSeekCompletionUserPrompt(text, todayISO, allowedPaymentMethods, base) {
-  return [
-    "Completa el gasto con base en el texto del usuario.",
-    "",
-    `Hoy es: ${todayISO} (YYYY-MM-DD).`,
-    "",
-    "Texto del usuario:",
-    text,
-    "",
-    "Campos actuales (NO cambies los no-null):",
-    JSON.stringify(base),
-    "",
-    "Devuelve SOLO JSON con exactamente las mismas llaves:",
-    JSON.stringify({
-      amount_mxn: 230,
-      payment_method: "Banorte Platino",
-      category: "Transport",
-      purchase_date: "2026-01-16",
-      merchant: "Uber",
-      description: "Viaje Uber"
-    }),
-    "",
-    "Métodos de pago permitidos:",
-    allowedPaymentMethods.join(" | "),
-    "",
-    "Categorías permitidas:",
-    ALLOWED_CATEGORIES.join(" | ")
-  ].join("\n");
-}
-
 /* =======================
  * Llamada a DeepSeek
  * ======================= */
@@ -170,41 +121,6 @@ export async function callDeepSeekParse(text) {
     messages: [
       { role: "system", content: deepSeekSystemInstruction() },
       { role: "user", content: deepSeekUserPrompt(text, today, allowedPaymentMethods) }
-    ]
-  };
-
-  const res = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${DEEPSEEK_API_KEY}`
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const bodyText = await res.text();
-  if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}: ${bodyText}`);
-
-  const data = JSON.parse(bodyText);
-  const out = data?.choices?.[0]?.message?.content || "";
-  return extractJsonObject(out);
-}
-
-export async function callDeepSeekComplete(text, base) {
-  if (!DEEPSEEK_API_KEY) throw new Error("Missing env var: DEEPSEEK_API_KEY");
-
-  const today = todayISOInTZ();
-  const allowedPaymentMethods = await getAllowedPaymentMethods();
-
-  const payload = {
-    model: "deepseek-chat",
-    temperature: 0.2,
-    messages: [
-      { role: "system", content: deepSeekCompletionSystemInstruction() },
-      {
-        role: "user",
-        content: deepSeekCompletionUserPrompt(text, today, allowedPaymentMethods, base)
-      }
     ]
   };
 
