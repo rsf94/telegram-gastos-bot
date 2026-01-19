@@ -10,8 +10,14 @@ import {
   escapeHtml
 } from "./telegram.js";
 import { insertExpenseAndMaybeInstallments } from "./storage/bigquery.js";
-import { callDeepSeekParse, validateParsedFromAI } from "./deepseek.js";
-import { naiveParse, validateDraft, overrideRelativeDate, preview } from "./parsing.js";
+import { callDeepSeekComplete } from "./deepseek.js";
+import {
+  localParseExpense,
+  naiveParse,
+  validateDraft,
+  overrideRelativeDate,
+  preview
+} from "./parsing.js";
 import { runDailyCardReminders } from "./reminders.js";
 
 warnMissingEnv();
@@ -77,6 +83,82 @@ function logBigQueryError(e) {
   } catch (_) {
     // ignore
   }
+}
+
+let deepSeekCalls = 0;
+
+function hasClassificationContext(draft) {
+  const desc = String(draft.description || "").trim();
+  return desc && desc.toLowerCase() !== "gasto";
+}
+
+function shouldCallDeepSeek(draft) {
+  const missingAmount = !isFinite(draft.amount_mxn) || draft.amount_mxn <= 0;
+  const missingPayment = !draft.payment_method;
+  const missingDate = !draft.purchase_date;
+  const missingRequired = missingAmount || missingPayment || missingDate;
+
+  const needsCategory =
+    !missingRequired && draft.category === "Other" && hasClassificationContext(draft);
+
+  const complex = draft.__meta?.has_multiple_amounts === true;
+
+  return missingRequired || needsCategory || complex;
+}
+
+function buildCompletionBase(draft) {
+  const base = {
+    amount_mxn: isFinite(draft.amount_mxn) && draft.amount_mxn > 0 ? draft.amount_mxn : null,
+    payment_method: draft.payment_method || null,
+    category: draft.category !== "Other" ? draft.category : null,
+    purchase_date: draft.purchase_date || null,
+    merchant: draft.merchant || null,
+    description:
+      draft.description && draft.description.toLowerCase() !== "gasto"
+        ? draft.description
+        : null
+  };
+
+  return base;
+}
+
+function mergeLocalAndAI(local, ai) {
+  const merged = { ...local };
+
+  if (ai && typeof ai === "object") {
+    if (!isFinite(merged.amount_mxn) || merged.amount_mxn <= 0) {
+      const amount = Number(ai.amount_mxn);
+      if (Number.isFinite(amount) && amount > 0) merged.amount_mxn = amount;
+    }
+
+    if (!merged.payment_method && typeof ai.payment_method === "string") {
+      merged.payment_method = ai.payment_method.trim();
+    }
+
+    if (
+      (!merged.purchase_date || !/^\d{4}-\d{2}-\d{2}$/.test(merged.purchase_date)) &&
+      typeof ai.purchase_date === "string"
+    ) {
+      merged.purchase_date = ai.purchase_date.trim();
+    }
+
+    if (merged.category === "Other" && typeof ai.category === "string") {
+      merged.category = ai.category.trim();
+    }
+
+    if (!merged.merchant && typeof ai.merchant === "string") {
+      merged.merchant = ai.merchant.trim();
+    }
+
+    if (
+      (!merged.description || merged.description.toLowerCase() === "gasto") &&
+      typeof ai.description === "string"
+    ) {
+      merged.description = ai.description.trim();
+    }
+  }
+
+  return merged;
 }
 
 /* =======================
@@ -262,7 +344,32 @@ app.post("/telegram-webhook", async (req, res) => {
     // =========================
     // Detecta si es MSI (FLUJO B) o normal (FLUJO C)
     // =========================
-    const wantsMsi = looksLikeMsiText(text);
+    const localParseStart = Date.now();
+    let draft = localParseExpense(text);
+    const localParseMs = Date.now() - localParseStart;
+
+    console.info(
+      `⏱️ local-parse=${localParseMs}ms amounts=${draft.__meta?.amounts_found || 0} msi=${draft.is_msi}`
+    );
+
+    const wantsMsi = draft.is_msi || looksLikeMsiText(text);
+    const needsAI = shouldCallDeepSeek(draft);
+    let deepSeekMs = null;
+
+    if (needsAI) {
+      try {
+        const aiStart = Date.now();
+        deepSeekCalls += 1;
+        const base = buildCompletionBase(draft);
+        const ai = await callDeepSeekComplete(text, base);
+        deepSeekMs = Date.now() - aiStart;
+        console.info(`🤖 deepseek=${deepSeekMs}ms calls=${deepSeekCalls}`);
+
+        draft = mergeLocalAndAI(draft, ai);
+      } catch (e) {
+        console.warn("DeepSeek complete failed, usando parse local:", e?.message || e);
+      }
+    }
 
     // =========================
     // FLUJO B: MSI (step 1)
@@ -271,54 +378,37 @@ app.post("/telegram-webhook", async (req, res) => {
     // - pregunta meses.
     // =========================
     if (wantsMsi) {
-      let draft = null;
-
-      // 1) intentar IA
-      try {
-        const parsed = await callDeepSeekParse(text);
-        const v = await validateParsedFromAI(parsed);
-
-        if (v.ok) {
-          draft = v.draft;
-        } else {
-          // si el AI ya detectó MSI sin meses y nos dio draft parcial
-          if (v.needs_msi_months && v.draft) {
-            draft = v.draft;
-          }
-        }
-      } catch (e) {
-        draft = null;
-      }
-
-      // 2) fallback naive si no hay draft usable
-      if (!draft) {
-        draft = naiveParse(text);
-        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-        const err = validateDraft(draft);
-        if (err) {
-          await tgSend(chatId, err);
-          return;
-        }
-      }
-
-      // 3) fija MSI incompleto
       draft.raw_text = text;
       draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
 
       // interpretamos el monto del texto como TOTAL de la compra
       draft.is_msi = true;
       draft.msi_total_amount = Number(draft.msi_total_amount || draft.amount_mxn);
-      draft.msi_months = null;
       draft.msi_start_month = monthStartISO(draft.purchase_date);
 
-      // estado: esperando meses
-      draft.__state = "awaiting_msi_months";
+      const err = validateDraft(draft);
+      if (err) {
+        await tgSend(chatId, err);
+        return;
+      }
+
+      if (!Number.isFinite(draft.msi_months) || draft.msi_months <= 1) {
+        draft.msi_months = null;
+        draft.__state = "awaiting_msi_months";
+
+        draftByChat.set(chatId, draft);
+        await tgSend(
+          chatId,
+          "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (responde solo el número, ej: <code>6</code>)"
+        );
+        return;
+      }
+
+      draft.amount_mxn = round2(Number(draft.msi_total_amount) / draft.msi_months);
+      delete draft.__state;
 
       draftByChat.set(chatId, draft);
-      await tgSend(
-        chatId,
-        "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (responde solo el número, ej: <code>6</code>)"
-      );
+      await tgSend(chatId, preview(draft), { reply_markup: mainKeyboard() });
       return;
     }
 
@@ -333,31 +423,19 @@ app.post("/telegram-webhook", async (req, res) => {
       return;
     }
 
-    let draft;
-    try {
-      const parsed = await callDeepSeekParse(text);
-      const v = await validateParsedFromAI(parsed);
+    draft.raw_text = text;
+    draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
 
-      if (!v.ok) {
-        await tgSend(chatId, `❌ ${escapeHtml(v.error)}`);
-        return;
-      }
-
-      draft = v.draft;
-      draft.raw_text = text;
-      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-    } catch (e) {
-      console.error("DeepSeek parse failed, fallback naive:", e);
-
+    if (!isFinite(draft.amount_mxn) || draft.amount_mxn <= 0) {
       draft = naiveParse(text);
       draft.raw_text = text;
       draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+    }
 
-      const err = validateDraft(draft);
-      if (err) {
-        await tgSend(chatId, err);
-        return;
-      }
+    const err = validateDraft(draft);
+    if (err) {
+      await tgSend(chatId, err);
+      return;
     }
 
     // asegúrate que NO sea MSI
