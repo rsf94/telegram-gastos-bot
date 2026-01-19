@@ -1,5 +1,6 @@
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 export const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+export const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 export const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 export const LLM_PROVIDER = process.env.LLM_PROVIDER || "gemini";
 export const LLM_FALLBACK = process.env.LLM_FALLBACK;
