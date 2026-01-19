@@ -122,86 +122,9 @@ export function naiveParse(text) {
 }
 
 /* =======================
- * Local fast parse (local-first)
- * ======================= */
-function extractFirstAmount(text) {
-  const match = String(text || "").match(
-    /(\d{1,3}(?:[\s,]\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?)/
-  );
-  if (!match) return NaN;
-  const raw = match[1].replace(/\s/g, "");
-  if (raw.includes(",") && raw.includes(".")) {
-    return Number(raw.replace(/,/g, ""));
-  }
-  if (raw.includes(",")) {
-    return Number(raw.replace(",", "."));
-  }
-  return Number(raw);
-}
-
-function findPaymentMethod(text, allowedMethods) {
-  const lower = String(text || "").toLowerCase();
-  const sorted = [...allowedMethods].sort((a, b) => b.length - a.length);
-  return (
-    sorted.find((method) => lower.includes(method.toLowerCase())) || ""
-  );
-}
-
-function extractExplicitDate(text) {
-  return (String(text || "").match(/\b\d{4}-\d{2}-\d{2}\b/) || [])[0] || "";
-}
-
-function stripNoise(text, parts) {
-  let out = String(text || "");
-  for (const part of parts) {
-    if (!part) continue;
-    out = out.replace(part, " ");
-  }
-  out = out
-    .replace(/\b(msi|meses\s+sin\s+intereses)\b/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return out;
-}
-
-export function localParse(text, allowedMethods = ALLOWED_PAYMENT_METHODS) {
-  const amount = extractFirstAmount(text);
-  const payment_method = findPaymentMethod(text, allowedMethods);
-  const today = todayISOInTZ();
-  const explicitDate = extractExplicitDate(text);
-  const purchase_date = overrideRelativeDate(text, explicitDate || today);
-
-  const lower = String(text || "").toLowerCase();
-  const is_msi = /\bmsi\b|\bmeses\s+sin\s+intereses\b/.test(lower);
-
-  const cleaned = stripNoise(text, [
-    explicitDate,
-    payment_method,
-    String(amount)
-  ]);
-
-  return {
-    amount_mxn: amount,
-    payment_method,
-    category: "Other",
-    purchase_date,
-    merchant: "",
-    description: cleaned || "Gasto",
-    is_msi,
-    msi_months: null,
-    msi_total_amount: is_msi && isFinite(amount) ? Number(amount) : null,
-    msi_start_month: is_msi ? monthStartISO(purchase_date) : null,
-    __local: {
-      descriptionText: cleaned,
-      explicitDate
-    }
-  };
-}
-
-/* =======================
  * Validate draft (incluye MSI)
  * ======================= */
-export function validateDraft(d, allowedMethods = ALLOWED_PAYMENT_METHODS) {
+export function validateDraft(d) {
   // Si es MSI y faltan meses, NO lo marques como error duro:
   // tu index.js ya tiene el flujo para pedir "¿a cuántos meses?"
   if (d?.is_msi === true) {
@@ -228,7 +151,7 @@ export function validateDraft(d, allowedMethods = ALLOWED_PAYMENT_METHODS) {
     }
     return (
       "❌ Método de pago inválido. Usa uno de:\n- " +
-      allowedMethods.join("\n- ")
+      ALLOWED_PAYMENT_METHODS.join("\n- ")
     );
   }
 

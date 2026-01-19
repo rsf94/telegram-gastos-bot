@@ -63,48 +63,11 @@ Configura estas env vars en Cloud Run:
 
 ### Opcional (pero recomendado)
 - `DEEPSEEK_API_KEY` → si no está, el bot usa parseo naive (menos inteligente)
-- `LOG_PERF` → `false` para desactivar logs de performance (por default es `true`)
 
 > Nota: para autenticación a BigQuery, Cloud Run debe ejecutar con un Service Account con permisos.  
 > Recomendación: `BigQuery Data Editor` en el dataset.
 
 ---
-
-## ⏱️ Medición de performance
-
-El webhook emite logs JSON estructurados con el prefijo `type: "perf"` (a menos que `LOG_PERF=false`).  
-Campos clave:
-
-- `local_parse_ms`: tiempo del parse local
-- `llm_ms`: tiempo total en llamadas LLM (si aplica)
-- `llm_calls`: contador de llamadas LLM
-- `total_ms`: tiempo total del webhook
-
-Para verlos en Cloud Run, filtra por `type=perf` en los logs.
-
----
-
-## ✅ Casos de prueba manual
-
-1) **Normal (sin MSI)**  
-   Input: `230 Uber American Express ayer`  
-   Esperado: preview con fecha de ayer, método American Express, monto 230, sin MSI.
-
-2) **MSI paso 1**  
-   Input: `gasolina 1200 BBVA Platino a MSI`  
-   Esperado: pide meses, no llama LLM si detecta monto + tarjeta + fecha.
-
-3) **MSI paso 2**  
-   Input: `6` (después del paso 1)  
-   Esperado: preview MSI con mensualidad, sin llamada LLM.
-
-4) **Fecha explícita**  
-   Input: `85 Starbucks Rappi Card 2026-01-15`  
-   Esperado: fecha 2026-01-15 en preview.
-
-5) **Método inválido**  
-   Input: `100 tacos Amex hoy`  
-   Esperado: error indicando que "Amex" es ambiguo.
 
 ## 🗃️ Schema sugerido en BigQuery
 

@@ -106,38 +106,6 @@ function deepSeekUserPrompt(text, todayISO, allowedPaymentMethods) {
   ].join("\n");
 }
 
-function deepSeekCompletionSystemInstruction() {
-  return [
-    "Eres un asistente para completar campos de gasto.",
-    "NO cambies amount_mxn, payment_method o purchase_date.",
-    "Solo devuelve JSON válido con merchant, description y category.",
-    "Si no estás seguro de category, usa 'Other'.",
-    "Sin texto extra ni backticks."
-  ].join(" ");
-}
-
-function deepSeekCompletionUserPrompt(text, fixed, allowedCategories) {
-  return [
-    "Completa merchant, description y category.",
-    "Mantén fijos estos campos:",
-    JSON.stringify({
-      amount_mxn: fixed.amount_mxn,
-      payment_method: fixed.payment_method,
-      purchase_date: fixed.purchase_date
-    }),
-    "Texto original:",
-    text,
-    "Devuelve SOLO JSON con:",
-    JSON.stringify({
-      merchant: "",
-      description: "",
-      category: "Other"
-    }),
-    "Categorías permitidas:",
-    allowedCategories.join(" | ")
-  ].join("\n");
-}
-
 /* =======================
  * Llamada a DeepSeek
  * ======================= */
@@ -156,69 +124,21 @@ export async function callDeepSeekParse(text) {
     ]
   };
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 4000);
+  const res = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${DEEPSEEK_API_KEY}`
+    },
+    body: JSON.stringify(payload)
+  });
 
-  try {
-    const res = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${DEEPSEEK_API_KEY}`
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
+  const bodyText = await res.text();
+  if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}: ${bodyText}`);
 
-    const bodyText = await res.text();
-    if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}: ${bodyText}`);
-
-    const data = JSON.parse(bodyText);
-    const out = data?.choices?.[0]?.message?.content || "";
-    return extractJsonObject(out);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-export async function callDeepSeekComplete(text, fixed) {
-  if (!DEEPSEEK_API_KEY) throw new Error("Missing env var: DEEPSEEK_API_KEY");
-
-  const payload = {
-    model: "deepseek-chat",
-    temperature: 0.2,
-    messages: [
-      { role: "system", content: deepSeekCompletionSystemInstruction() },
-      {
-        role: "user",
-        content: deepSeekCompletionUserPrompt(text, fixed, ALLOWED_CATEGORIES)
-      }
-    ]
-  };
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 4000);
-
-  try {
-    const res = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${DEEPSEEK_API_KEY}`
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-
-    const bodyText = await res.text();
-    if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}: ${bodyText}`);
-
-    const data = JSON.parse(bodyText);
-    const out = data?.choices?.[0]?.message?.content || "";
-    return extractJsonObject(out);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  const data = JSON.parse(bodyText);
+  const out = data?.choices?.[0]?.message?.content || "";
+  return extractJsonObject(out);
 }
 
 /* =======================
@@ -305,17 +225,4 @@ export async function validateParsedFromAI(obj) {
   d.msi_start_month = null;
 
   return { ok: true, draft: d };
-}
-
-export function validateCompletionFromAI(obj) {
-  const out = {
-    category: String(obj?.category || "Other"),
-    merchant: String(obj?.merchant || ""),
-    description: String(obj?.description || "")
-  };
-
-  if (!ALLOWED_CATEGORIES.includes(out.category)) out.category = "Other";
-  if (!out.description) out.description = "Gasto";
-
-  return out;
 }
