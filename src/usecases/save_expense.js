@@ -176,7 +176,7 @@ export async function saveExpense({
             total_ms: totalMs,
             llm_provider: llmProvider,
             cache_hit: { card_rules: cacheHitCardRules, llm: false },
-            used_fallback,
+            used_fallback: usedFallback,
             err_short: shortError(error)
           },
           "warn"
