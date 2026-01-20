@@ -78,6 +78,23 @@ export function editMenuKeyboard() {
   };
 }
 
+export function paymentMethodKeyboard(methods) {
+  const rows = [];
+  const list = Array.isArray(methods) ? methods : [];
+
+  for (let i = 0; i < list.length; i += 2) {
+    const row = [];
+    const left = list[i];
+    const right = list[i + 1];
+    if (left) row.push({ text: left, callback_data: `payment_method|${left}` });
+    if (right) row.push({ text: right, callback_data: `payment_method|${right}` });
+    if (row.length) rows.push(row);
+  }
+
+  rows.push([{ text: "❌ Cancelar", callback_data: "cancel" }]);
+  return { inline_keyboard: rows };
+}
+
 /**
  * Confirmación de borrado
  */

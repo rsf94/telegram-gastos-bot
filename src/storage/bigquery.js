@@ -161,17 +161,55 @@ export async function logReminderSent({ chatId, cardName, cutISO }) {
 /* =======================
  * Lista dinámica de tarjetas activas
  * ======================= */
-export async function getActiveCardNames() {
+export async function getActiveCardNames(chatId) {
   const query = `
     SELECT DISTINCT card_name
     FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.card_rules\`
     WHERE active = TRUE
+      ${chatId ? "AND chat_id = @chat_id" : ""}
     ORDER BY card_name
   `;
 
-  const [job] = await bq.createQueryJob({ query });
+  const options = chatId
+    ? { query, params: { chat_id: String(chatId) }, parameterMode: "NAMED" }
+    : { query };
+
+  const [job] = await bq.createQueryJob(options);
   const [rows] = await job.getQueryResults();
   return rows.map((r) => String(r.card_name));
+}
+
+export async function updateExpenseEnrichment({
+  chatId,
+  expenseId,
+  category,
+  merchant,
+  description
+}) {
+  const query = `
+    UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+    SET
+      category = @category,
+      merchant = @merchant,
+      description = @description
+    WHERE chat_id = @chat_id
+      AND id = @expense_id
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      expense_id: String(expenseId),
+      category: String(category || "Other"),
+      merchant: merchant ? String(merchant) : null,
+      description: description ? String(description) : null
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  await job.getQueryResults();
 }
 
 /* =======================

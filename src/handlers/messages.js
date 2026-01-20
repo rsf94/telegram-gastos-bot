@@ -1,8 +1,8 @@
 import { ALLOWED_PAYMENT_METHODS } from "../config.js";
 import {
   tgSend,
-  mainKeyboard,
   deleteConfirmKeyboard,
+  paymentMethodKeyboard,
   escapeHtml
 } from "../telegram.js";
 import {
@@ -10,9 +10,11 @@ import {
   naiveParse,
   validateDraft,
   overrideRelativeDate,
-  preview
+  preview,
+  guessCategory,
+  guessMerchant,
+  cleanTextForDescription
 } from "../parsing.js";
-import { enrichExpenseLLM } from "../gemini.js";
 import {
   getDraft,
   setDraft,
@@ -22,7 +24,8 @@ import {
 } from "../state.js";
 import {
   getExpenseById,
-  countInstallmentsForExpense
+  countInstallmentsForExpense,
+  getActiveCardNames
 } from "../storage/bigquery.js";
 import { saveExpense } from "../usecases/save_expense.js";
 
@@ -110,12 +113,12 @@ function logBigQueryError(e) {
 
 export function createMessageHandler({
   sendMessage = tgSend,
-  mainKeyboardFn = mainKeyboard,
   deleteConfirmKeyboardFn = deleteConfirmKeyboard,
+  paymentMethodKeyboardFn = paymentMethodKeyboard,
   saveExpenseFn = saveExpense,
-  enrichExpenseLLMFn = enrichExpenseLLM,
   getExpenseByIdFn = getExpenseById,
-  countInstallmentsForExpenseFn = countInstallmentsForExpense
+  countInstallmentsForExpenseFn = countInstallmentsForExpense,
+  getActiveCardNamesFn = getActiveCardNames
 } = {}) {
   return async function handleMessage(msg) {
     if (!msg?.chat?.id) return;
@@ -167,6 +170,10 @@ export function createMessageHandler({
         await sendMessage(chatId, "No tengo borrador. Mándame un gasto primero.");
         return;
       }
+      if (!draft.payment_method) {
+        await sendMessage(chatId, "Elige un método con botones o escribe cancelar.");
+        return;
+      }
 
       const result = await saveExpenseFn({ chatId, draft });
       if (result.ok) {
@@ -210,6 +217,11 @@ export function createMessageHandler({
     // FLUJO A: "Esperando meses" (MSI step 2)
     // =========================
     const existing = getDraft(chatId);
+    if (existing?.__state === "awaiting_payment_method") {
+      await sendMessage(chatId, "Elige un método con botones o escribe cancelar.");
+      return;
+    }
+
     if (existing?.__state === "awaiting_msi_months") {
       const n = parseJustMonths(text);
       if (!n) {
@@ -234,11 +246,16 @@ export function createMessageHandler({
       // amount_mxn = mensual (cashflow)
       existing.amount_mxn = round2(Number(existing.msi_total_amount) / n);
 
-      // ya no estamos esperando
-      delete existing.__state;
+      existing.__state = "awaiting_payment_method";
 
       setDraft(chatId, existing);
-      await sendMessage(chatId, preview(existing), { reply_markup: mainKeyboardFn() });
+
+      const activeCards = await getActiveCardNamesFn(chatId);
+      const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
+
+      await sendMessage(chatId, preview(existing), {
+        reply_markup: paymentMethodKeyboardFn(paymentMethods)
+      });
       return;
     }
 
@@ -265,11 +282,13 @@ export function createMessageHandler({
 
     draft.raw_text = text;
     draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+    draft.__perf = { parse_ms: localParseMs };
 
     if (!isFinite(draft.amount_mxn) || draft.amount_mxn <= 0) {
       draft = naiveParse(text);
       draft.raw_text = text;
       draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
+      draft.__perf = { parse_ms: localParseMs };
     }
 
     if (wantsMsi) {
@@ -277,23 +296,19 @@ export function createMessageHandler({
       draft.msi_total_amount = Number(draft.msi_total_amount || draft.amount_mxn);
     }
 
-    const err = validateDraft(draft);
+    draft.payment_method = null;
+    draft.amex_ambiguous = false;
+
+    const amountToken = draft.__meta?.amount_tokens?.[0] || "";
+    draft.description = cleanTextForDescription(text, amountToken, null) || "Gasto";
+    draft.merchant = guessMerchant(text) || "";
+    draft.category = guessCategory(`${draft.merchant} ${draft.description}`);
+
+    const err = validateDraft(draft, { skipPaymentMethod: true });
     if (err) {
       await sendMessage(chatId, err);
       return;
     }
-
-    const llmStart = Date.now();
-    const ai = await enrichExpenseLLMFn({ text, baseDraft: draft });
-    const llmMs = Date.now() - llmStart;
-    draft.category = ai.category;
-    draft.merchant = ai.merchant;
-    draft.description = ai.description;
-    draft.__perf = {
-      local_parse_ms: localParseMs,
-      llm_ms: llmMs,
-      llm_provider: ai.llm_provider || null
-    };
 
     // =========================
     // FLUJO B: MSI (step 1)
@@ -320,10 +335,15 @@ export function createMessageHandler({
       }
 
       draft.amount_mxn = round2(Number(draft.msi_total_amount) / draft.msi_months);
-      delete draft.__state;
+      draft.__state = "awaiting_payment_method";
 
       setDraft(chatId, draft);
-      await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
+      const activeCards = await getActiveCardNamesFn(chatId);
+      const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
+
+      await sendMessage(chatId, preview(draft), {
+        reply_markup: paymentMethodKeyboardFn(paymentMethods)
+      });
       return;
     }
 
@@ -335,7 +355,12 @@ export function createMessageHandler({
     draft.msi_total_amount = null;
     draft.msi_start_month = null;
 
+    draft.__state = "awaiting_payment_method";
     setDraft(chatId, draft);
-    await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
+    const activeCards = await getActiveCardNamesFn(chatId);
+    const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
+    await sendMessage(chatId, preview(draft), {
+      reply_markup: paymentMethodKeyboardFn(paymentMethods)
+    });
   };
 }
