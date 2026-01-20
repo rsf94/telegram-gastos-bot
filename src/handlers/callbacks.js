@@ -162,10 +162,14 @@ export function createCallbackHandler({
       }
 
       if (draft.is_msi) {
+        const cacheMeta = draft.__perf?.cache_hit || { card_rules: null, llm: null };
+        draft.__perf = { ...draft.__perf, cache_hit: cacheMeta };
+
         draft.msi_start_month = await getBillingMonthForPurchaseFn({
           chatId,
           cardName: draft.payment_method,
-          purchaseDateISO: draft.purchase_date
+          purchaseDateISO: draft.purchase_date,
+          cacheMeta
         });
       }
 

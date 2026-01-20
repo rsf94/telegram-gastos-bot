@@ -40,6 +40,7 @@ export async function deleteExpense({
       bq_ms: bqMs,
       total_ms: bqMs,
       llm_provider: null,
+      cache_hit: { card_rules: null, llm: false },
       ok: true,
       err_short: null
     });
@@ -60,6 +61,7 @@ export async function deleteExpense({
         bq_ms: bqMs,
         total_ms: bqMs,
         llm_provider: null,
+        cache_hit: { card_rules: null, llm: false },
         ok: false,
         err_short: shortError(e)
       },

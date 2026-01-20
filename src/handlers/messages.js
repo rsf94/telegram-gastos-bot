@@ -255,10 +255,14 @@ export function createMessageHandler({
         return;
       }
 
+      const cacheMeta = existing.__perf?.cache_hit || { card_rules: null, llm: null };
+      existing.__perf = { ...existing.__perf, cache_hit: cacheMeta };
+
       existing.msi_start_month = await getBillingMonthForPurchaseFn({
         chatId,
         cardName: existing.payment_method,
-        purchaseDateISO: existing.purchase_date
+        purchaseDateISO: existing.purchase_date,
+        cacheMeta
       });
 
       // amount_mxn = mensual (cashflow)
@@ -295,13 +299,13 @@ export function createMessageHandler({
 
     draft.raw_text = text;
     draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-    draft.__perf = { parse_ms: localParseMs };
+    draft.__perf = { parse_ms: localParseMs, cache_hit: { card_rules: null, llm: null } };
 
     if (!isFinite(draft.amount_mxn) || draft.amount_mxn <= 0) {
       draft = naiveParse(text);
       draft.raw_text = text;
       draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-      draft.__perf = { parse_ms: localParseMs };
+      draft.__perf = { parse_ms: localParseMs, cache_hit: { card_rules: null, llm: null } };
     }
 
     if (wantsMsi) {

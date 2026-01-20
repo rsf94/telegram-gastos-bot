@@ -4,6 +4,10 @@ const { BigQuery } = bigqueryPkg;
 import crypto from "crypto";
 
 import { BQ_PROJECT_ID, BQ_DATASET, BQ_TABLE } from "../config.js";
+import {
+  getCardRuleWithMeta,
+  getActiveCardNames as getActiveCardNamesCached
+} from "../cache/card_rules_cache.js";
 
 const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
 
@@ -162,21 +166,7 @@ export async function logReminderSent({ chatId, cardName, cutISO }) {
  * Lista dinámica de tarjetas activas
  * ======================= */
 export async function getActiveCardNames(chatId) {
-  const query = `
-    SELECT DISTINCT card_name
-    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.card_rules\`
-    WHERE active = TRUE
-      ${chatId ? "AND chat_id = @chat_id" : ""}
-    ORDER BY card_name
-  `;
-
-  const options = chatId
-    ? { query, params: { chat_id: String(chatId) }, parameterMode: "NAMED" }
-    : { query };
-
-  const [job] = await bq.createQueryJob(options);
-  const [rows] = await job.getQueryResults();
-  return rows.map((r) => String(r.card_name));
+  return getActiveCardNamesCached(chatId);
 }
 
 export async function updateExpenseEnrichment({
@@ -219,56 +209,36 @@ export async function getBillingMonthForPurchase({
   chatId,
   cardName,
   purchaseDateISO,
-  bqClient = bq
+  getCardRuleFn = getCardRuleWithMeta,
+  cacheMeta
 }) {
-  const query = `
-  WITH r AS (
-    SELECT
-      cut_day,
-      COALESCE(billing_shift_months, 0) AS billing_shift_months
-    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.card_rules\`
-    WHERE chat_id = @chat_id
-      AND card_name = @card_name
-      AND active = TRUE
-    LIMIT 1
-  ),
-  base AS (
-    SELECT
-      DATE_TRUNC(DATE(@purchase_date), MONTH) AS purchase_month,
-      EXTRACT(DAY FROM DATE(@purchase_date)) AS purchase_day,
-      r.cut_day AS cut_day,
-      r.billing_shift_months AS shift
-    FROM r
-  ),
-  base_month AS (
-    SELECT
-      CASE
-        WHEN purchase_day > cut_day
-          THEN DATE_ADD(purchase_month, INTERVAL 1 MONTH)
-        ELSE purchase_month
-      END AS base_month,
-      shift
-    FROM base
-  )
-  SELECT DATE_ADD(base_month, INTERVAL shift MONTH) AS billing_month
-  FROM base_month
-  `;
+  const { rule, cacheHit } = await getCardRuleFn(chatId, cardName);
+  if (cacheMeta && typeof cacheMeta === "object") {
+    cacheMeta.card_rules = cacheHit;
+  }
 
-  const options = {
-    query,
-    params: {
-      chat_id: String(chatId),
-      card_name: String(cardName),
-      purchase_date: purchaseDateISO
-    },
-    parameterMode: "NAMED"
-  };
+  if (!rule) {
+    throw new Error(`No billing_month found for ${cardName} ${purchaseDateISO}`);
+  }
 
-  const [job] = await bqClient.createQueryJob(options);
-  const [rows] = await job.getQueryResults();
-  const bm = rows?.[0]?.billing_month;
-  if (!bm) throw new Error(`No billing_month found for ${cardName} ${purchaseDateISO}`);
-  return normalizeDateISO(bm); // 'YYYY-MM-01'
+  const purchaseDate = new Date(`${purchaseDateISO}T12:00:00Z`);
+  const purchaseDay = purchaseDate.getUTCDate();
+  const cutDay = Number(rule.cut_day);
+  const shift = Number(rule.billing_shift_months || 0);
+
+  const baseMonth = new Date(
+    Date.UTC(purchaseDate.getUTCFullYear(), purchaseDate.getUTCMonth(), 1, 12, 0, 0)
+  );
+
+  if (purchaseDay > cutDay) {
+    baseMonth.setUTCMonth(baseMonth.getUTCMonth() + 1);
+  }
+
+  const billingMonth = new Date(
+    Date.UTC(baseMonth.getUTCFullYear(), baseMonth.getUTCMonth() + shift, 1, 12, 0, 0)
+  );
+
+  return normalizeDateISO(billingMonth); // 'YYYY-MM-01'
 }
 
 /* =======================
@@ -292,22 +262,6 @@ function addMonthsYYYYMM01(yyyyMm01, k) {
   return nd.toISOString().slice(0, 10);
 }
 
-async function installmentsExistForExpense(expenseId) {
-  const query = `
-    SELECT COUNT(1) AS c
-    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
-    WHERE expense_id = @expense_id
-  `;
-  const options = {
-    query,
-    params: { expense_id: String(expenseId) },
-    parameterMode: "NAMED"
-  };
-  const [job] = await bq.createQueryJob(options);
-  const [rows] = await job.getQueryResults();
-  return Number(rows?.[0]?.c || 0) > 0;
-}
-
 export async function createInstallmentsForExpense({
   expenseId,
   chatId,
@@ -316,9 +270,6 @@ export async function createInstallmentsForExpense({
   monthsTotal,
   totalAmount
 }) {
-  // ✅ dedupe simple
-  if (await installmentsExistForExpense(expenseId)) return 0;
-
   const table = bq.dataset(BQ_DATASET).table("installments");
   const amounts = splitIntoInstallments(totalAmount, monthsTotal);
   const nowISO = new Date().toISOString();
@@ -474,17 +425,15 @@ export async function deleteExpenseCascade({ chatId, expenseId }) {
   const query = `
     DECLARE deleted_installments INT64 DEFAULT 0;
     DECLARE deleted_expense INT64 DEFAULT 0;
-    BEGIN
-      DELETE FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
-      WHERE chat_id = @chat_id
-        AND expense_id = @expense_id;
-      SET deleted_installments = @@row_count;
+    DELETE FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+    WHERE chat_id = @chat_id
+      AND expense_id = @expense_id;
+    SET deleted_installments = @@row_count;
 
-      DELETE FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-      WHERE chat_id = @chat_id
-        AND id = @expense_id;
-      SET deleted_expense = @@row_count;
-    END;
+    DELETE FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+    WHERE chat_id = @chat_id
+      AND id = @expense_id;
+    SET deleted_expense = @@row_count;
     SELECT
       deleted_installments AS deleted_installments,
       deleted_expense AS deleted_expense

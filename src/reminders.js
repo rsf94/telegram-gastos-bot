@@ -59,11 +59,24 @@ function formatMoneyMXN(n) {
   return x.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
 }
 
+function logPerf(payload, level = "log") {
+  const base = { type: "perf", ...payload };
+  if (level === "warn") {
+    console.warn(JSON.stringify(base));
+  } else {
+    console.log(JSON.stringify(base));
+  }
+}
+
 // ✅ CAMBIO 1: acepta { force }
 export async function runDailyCardReminders({ force = false } = {}) {
+  const startMs = Date.now();
+  let bqMs = 0;
   const todayISO = todayISOInTZ(); // CDMX
 
+  const rulesStart = Date.now();
   const rules = await getActiveCardRules();
+  bqMs += Date.now() - rulesStart;
 
   for (const r of rules) {
     const { y, m } = ymFromISO(todayISO);
@@ -74,11 +87,13 @@ export async function runDailyCardReminders({ force = false } = {}) {
 
     // ✅ CAMBIO 2: si force=true, no dedupe
     if (!force) {
+      const alreadyStart = Date.now();
       const already = await alreadySentReminder({
         chatId: r.chat_id,
         cardName: r.card_name,
         cutISO
       });
+      bqMs += Date.now() - alreadyStart;
       if (already) continue;
     }
 
@@ -88,12 +103,14 @@ export async function runDailyCardReminders({ force = false } = {}) {
     const startISO = addDaysISO(prevCutISO, 1);
     const endISO = cutISO;
 
+    const sumStart = Date.now();
     const total = await sumExpensesForCycle({
       chatId: r.chat_id,
       cardName: r.card_name,
       startISO,
       endISO
     });
+    bqMs += Date.now() - sumStart;
 
     let payISO = addDaysISO(cutISO, r.pay_offset_days);
     if (r.roll_weekend_to_monday) payISO = rollWeekendToMonday(payISO);
@@ -107,12 +124,25 @@ export async function runDailyCardReminders({ force = false } = {}) {
 
     await tgSend(r.chat_id, msg);
 
+    const logStart = Date.now();
     await logReminderSent({
       chatId: r.chat_id,
       cardName: r.card_name,
       cutISO
     });
+    bqMs += Date.now() - logStart;
   }
+
+  const totalMs = Date.now() - startMs;
+  logPerf({
+    flow: "reminder",
+    local_parse_ms: 0,
+    llm_ms: 0,
+    bq_ms: bqMs,
+    total_ms: totalMs,
+    llm_provider: null,
+    cache_hit: { card_rules: null, llm: false }
+  });
 
   return { ok: true, todayISO, processed: rules.length };
 }
