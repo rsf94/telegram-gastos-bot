@@ -5,9 +5,9 @@ import { runDailyCardReminders } from "./reminders.js";
 import { createCallbackHandler } from "./handlers/callbacks.js";
 import { createMessageHandler } from "./handlers/messages.js";
 import {
-  deleteEnrichmentRetryTask,
   getDueEnrichmentRetries,
-  updateEnrichmentRetryTask,
+  getExpenseById,
+  insertEnrichmentRetryEvent,
   updateExpenseEnrichment
 } from "./storage/bigquery.js";
 import { processEnrichmentRetryQueue } from "./usecases/enrichment_retry.js";
@@ -65,6 +65,9 @@ app.get("/cron/daily", async (req, res) => {
 
 // ===== CRON: enrichment retry =====
 app.get("/cron/enrich", async (req, res) => {
+  const startedAt = Date.now();
+  let summary = null;
+  let errorShort = null;
   try {
     const token = String(req.query.token || "");
     if (!process.env.CRON_TOKEN || token !== process.env.CRON_TOKEN) {
@@ -72,19 +75,54 @@ app.get("/cron/enrich", async (req, res) => {
     }
 
     const limit = Number(req.query.limit || 50);
-    await processEnrichmentRetryQueue({
+    summary = await processEnrichmentRetryQueue({
       limit,
       getDueEnrichmentRetryTasksFn: getDueEnrichmentRetries,
+      getExpenseByIdFn: getExpenseById,
       updateExpenseEnrichmentFn: updateExpenseEnrichment,
-      updateEnrichmentRetryTaskFn: updateEnrichmentRetryTask,
-      deleteEnrichmentRetryTaskFn: deleteEnrichmentRetryTask
+      insertEnrichmentRetryEventFn: insertEnrichmentRetryEvent
     });
-
-    return res.status(200).send("ok");
   } catch (e) {
     console.error(e);
-    return res.status(500).send("error");
+    errorShort = String(e?.message || e || "").split("\n")[0].slice(0, 180);
+    if (!summary) {
+      summary = {
+        processed: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        llmMs: 0,
+        bqMs: 0,
+        llmProviders: []
+      };
+    }
+  } finally {
+    const totalMs = Date.now() - startedAt;
+    const providers = summary?.llmProviders || [];
+    const llmProvider =
+      providers.length === 0 ? "unknown" : providers.length === 1 ? providers[0] : "mixed";
+    const payload = {
+      type: "cron_enrich",
+      processed: summary?.processed || 0,
+      succeeded: summary?.succeeded || 0,
+      failed: summary?.failed || 0,
+      skipped: summary?.skipped || 0,
+      llm_provider: llmProvider,
+      llm_ms: summary?.llmMs || 0,
+      bq_ms: summary?.bqMs || 0,
+      total_ms: totalMs,
+      error: errorShort || undefined
+    };
+    console.log(JSON.stringify(payload));
   }
+
+  return res.status(200).json({
+    ok: true,
+    processed: summary?.processed || 0,
+    succeeded: summary?.succeeded || 0,
+    failed: summary?.failed || 0,
+    skipped: summary?.skipped || 0
+  });
 });
 
 const PORT = process.env.PORT || 8080;
