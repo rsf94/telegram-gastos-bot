@@ -5,6 +5,10 @@ import { createMessageHandler } from "../src/handlers/messages.js";
 import { createCallbackHandler } from "../src/handlers/callbacks.js";
 import { saveExpense } from "../src/usecases/save_expense.js";
 import { deleteExpense } from "../src/usecases/delete_expense.js";
+import {
+  processEnrichmentRetryQueue,
+  runEnrichmentUpdateWithRetry
+} from "../src/usecases/enrichment_retry.js";
 import { getDraft, getPendingDelete, __resetState } from "../src/state.js";
 import { guessCategory } from "../src/parsing.js";
 import { __resetConfirmIdempotency } from "../src/cache/confirm_idempotency.js";
@@ -508,4 +512,67 @@ test("card rules cache avoids repeated fetches", async () => {
   await getCardRule("40", "BBVA Platino");
 
   assert.equal(fetchCount, 1);
+});
+
+test("enrichment retry enqueues after streaming buffer error", async () => {
+  let updateCalls = 0;
+  let enqueuePayload = null;
+
+  const updateExpenseEnrichmentFn = async () => {
+    updateCalls += 1;
+    throw new Error("would affect rows in the streaming buffer");
+  };
+
+  const enqueueEnrichmentRetryFn = async (payload) => {
+    enqueuePayload = payload;
+  };
+
+  const result = await runEnrichmentUpdateWithRetry({
+    chatId: "50",
+    expenseId: "exp-50",
+    category: "Transport",
+    merchant: "Uber",
+    description: "Ride",
+    updateExpenseEnrichmentFn,
+    enqueueEnrichmentRetryFn,
+    backoffMs: [0, 0, 0, 0],
+    sleepFn: async () => {}
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(updateCalls, 5);
+  assert.equal(enqueuePayload.expenseId, "exp-50");
+  assert.equal(enqueuePayload.chatId, "50");
+});
+
+test("enrichment cron deletes task on success", async () => {
+  let deleted = null;
+  const tasks = [
+    {
+      expense_id: "exp-60",
+      chat_id: "60",
+      category: "Other",
+      merchant: null,
+      description: null,
+      attempts: 0
+    }
+  ];
+
+  const getDueEnrichmentRetryTasksFn = async () => tasks;
+  const updateExpenseEnrichmentFn = async () => {};
+  const updateEnrichmentRetryTaskFn = async () => {};
+  const deleteEnrichmentRetryTaskFn = async ({ expenseId, chatId }) => {
+    deleted = { expenseId, chatId };
+  };
+
+  const result = await processEnrichmentRetryQueue({
+    limit: 1,
+    getDueEnrichmentRetryTasksFn,
+    updateExpenseEnrichmentFn,
+    updateEnrichmentRetryTaskFn,
+    deleteEnrichmentRetryTaskFn
+  });
+
+  assert.equal(result.processed, 1);
+  assert.deepEqual(deleted, { expenseId: "exp-60", chatId: "60" });
 });

@@ -3,7 +3,12 @@ import bigqueryPkg from "@google-cloud/bigquery";
 const { BigQuery } = bigqueryPkg;
 import crypto from "crypto";
 
-import { BQ_PROJECT_ID, BQ_DATASET, BQ_TABLE } from "../config.js";
+import {
+  BQ_PROJECT_ID,
+  BQ_DATASET,
+  BQ_TABLE,
+  BQ_ENRICHMENT_RETRY_TABLE
+} from "../config.js";
 import {
   getCardRuleWithMeta,
   getActiveCardNames as getActiveCardNamesCached
@@ -194,6 +199,135 @@ export async function updateExpenseEnrichment({
       category: String(category || "Other"),
       merchant: merchant ? String(merchant) : null,
       description: description ? String(description) : null
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  await job.getQueryResults();
+  const [metadata] = await job.getMetadata();
+  const affected = Number(metadata?.statistics?.query?.numDmlAffectedRows || 0);
+  if (!affected) {
+    const err = new Error("BQ_UPDATE_NO_ROWS");
+    err.code = "BQ_UPDATE_NO_ROWS";
+    throw err;
+  }
+
+  return affected;
+}
+
+/* =======================
+ * Enrichment retry queue
+ * ======================= */
+export async function enqueueEnrichmentRetry({
+  expenseId,
+  chatId,
+  category,
+  merchant,
+  description,
+  attempts = 0,
+  nextAttemptAt,
+  lastError
+}) {
+  const table = bq.dataset(BQ_DATASET).table(BQ_ENRICHMENT_RETRY_TABLE);
+  const nowISO = new Date().toISOString();
+  await table.insert(
+    [
+      {
+        expense_id: String(expenseId),
+        chat_id: String(chatId),
+        category: category ? String(category) : null,
+        merchant: merchant ? String(merchant) : null,
+        description: description ? String(description) : null,
+        attempts: Number(attempts || 0),
+        next_attempt_at: nextAttemptAt,
+        last_error: lastError || null,
+        created_at: nowISO,
+        updated_at: nowISO
+      }
+    ],
+    { skipInvalidRows: false, ignoreUnknownValues: false }
+  );
+}
+
+export async function getDueEnrichmentRetries({ limit = 50, now = new Date() }) {
+  const safeLimit = Number(limit) > 0 ? Number(limit) : 50;
+  const query = `
+    SELECT
+      expense_id,
+      chat_id,
+      category,
+      merchant,
+      description,
+      attempts,
+      next_attempt_at,
+      last_error
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
+    WHERE next_attempt_at <= TIMESTAMP(@now)
+    ORDER BY next_attempt_at ASC
+    LIMIT ${safeLimit}
+  `;
+
+  const options = {
+    query,
+    params: {
+      now: now.toISOString()
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
+export async function updateEnrichmentRetryTask({
+  expenseId,
+  chatId,
+  attempts,
+  nextAttemptAt,
+  lastError
+}) {
+  const query = `
+    UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
+    SET
+      attempts = @attempts,
+      next_attempt_at = @next_attempt_at,
+      last_error = @last_error,
+      updated_at = @updated_at
+    WHERE expense_id = @expense_id
+      AND chat_id = @chat_id
+  `;
+
+  const options = {
+    query,
+    params: {
+      expense_id: String(expenseId),
+      chat_id: String(chatId),
+      attempts: Number(attempts || 0),
+      next_attempt_at: nextAttemptAt,
+      last_error: lastError || null,
+      updated_at: new Date().toISOString()
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  await job.getQueryResults();
+}
+
+export async function deleteEnrichmentRetryTask({ expenseId, chatId }) {
+  const query = `
+    DELETE FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
+    WHERE expense_id = @expense_id
+      AND chat_id = @chat_id
+  `;
+
+  const options = {
+    query,
+    params: {
+      expense_id: String(expenseId),
+      chat_id: String(chatId)
     },
     parameterMode: "NAMED"
   };
