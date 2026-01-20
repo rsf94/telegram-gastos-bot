@@ -1,15 +1,26 @@
 // index.js
 import express from "express";
 
-import { warnMissingEnv, ALLOWED_PAYMENT_METHODS, ALLOWED_CATEGORIES } from "./config.js";
+import {
+  warnMissingEnv,
+  ALLOWED_PAYMENT_METHODS,
+  ALLOWED_CATEGORIES,
+  LLM_PROVIDER
+} from "./config.js";
 import {
   tgSend,
   mainKeyboard,
   editMenuKeyboard,
+  deleteConfirmKeyboard,
   answerCallbackQuery,
   escapeHtml
 } from "./telegram.js";
-import { insertExpenseAndMaybeInstallments } from "./storage/bigquery.js";
+import {
+  insertExpenseAndMaybeInstallments,
+  getExpenseById,
+  countInstallmentsForExpense,
+  deleteExpenseCascade
+} from "./storage/bigquery.js";
 import { enrichExpenseLLM } from "./gemini.js";
 import {
   localParseExpense,
@@ -27,6 +38,8 @@ app.use(express.json({ limit: "1mb" }));
 
 // Draft store (MVP)
 const draftByChat = new Map(); // chatId -> draft
+const deleteByChat = new Map(); // chatId -> { expenseId, installmentsCount }
+const PERF_TELEGRAM = process.env.PERF_TELEGRAM === "1";
 
 /* =======================
  * Helpers
@@ -85,6 +98,72 @@ function logBigQueryError(e) {
   }
 }
 
+function shortError(error) {
+  const msg = error?.message || String(error || "");
+  return msg.split("\n")[0].slice(0, 180);
+}
+
+function isValidUuid(value) {
+  const s = String(value || "").trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s
+  );
+}
+
+function normalizeBqDate(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (typeof value === "object" && typeof value.value === "string") {
+    return value.value;
+  }
+  return String(value);
+}
+
+function formatDeletePreview(expense, installmentsCount) {
+  const lines = [
+    "🗑️ <b>Confirmar borrado</b>",
+    `ID: <code>${escapeHtml(expense.id)}</code>`,
+    `Monto: <b>${escapeHtml(expense.amount_mxn)}</b>`,
+    `Método: <b>${escapeHtml(expense.payment_method)}</b>`,
+    `Fecha: <b>${escapeHtml(normalizeBqDate(expense.purchase_date))}</b>`,
+    `Categoría: <b>${escapeHtml(expense.category || "Other")}</b>`,
+    `Descripción: <b>${escapeHtml(expense.description || "")}</b>`
+  ];
+
+  if (expense.is_msi) {
+    lines.push(
+      `MSI: <b>sí</b>`,
+      `Meses: <b>${escapeHtml(expense.msi_months)}</b>`,
+      `Total MSI: <b>${escapeHtml(expense.msi_total_amount)}</b>`
+    );
+  } else {
+    lines.push("MSI: <b>no</b>");
+  }
+
+  if (installmentsCount > 0) {
+    lines.push(`⚠️ Esto eliminará también ${installmentsCount} mensualidades`);
+  }
+
+  return lines.join("\n");
+}
+
+function logPerf(payload, level = "log") {
+  const base = {
+    type: "perf",
+    ...payload
+  };
+  if (level === "warn") {
+    console.warn(JSON.stringify(base));
+  } else {
+    console.log(JSON.stringify(base));
+  }
+}
+
+function formatPerfLine({ totalMs, llmMs, bqMs }) {
+  return `⏱️ ${totalMs}ms (LLM ${llmMs}ms, BQ ${bqMs}ms)`;
+}
+
 /* =======================
  * Routes
  * ======================= */
@@ -104,6 +183,73 @@ app.post("/telegram-webhook", async (req, res) => {
       const chatId = String(cb.message.chat.id);
       const data = cb.data;
 
+      // 🗑️ Confirmar borrado
+      if (data === "delete_confirm") {
+        const pendingDelete = deleteByChat.get(chatId);
+        if (!pendingDelete?.expenseId) {
+          await tgSend(chatId, "No tengo un borrado pendiente.");
+          await answerCallbackQuery(cb.id);
+          return;
+        }
+
+        const bqStart = Date.now();
+        try {
+          const result = await deleteExpenseCascade({
+            chatId,
+            expenseId: pendingDelete.expenseId
+          });
+          deleteByChat.delete(chatId);
+
+          const bqMs = Date.now() - bqStart;
+          logPerf({
+            flow: "expense_delete",
+            chat_id: chatId,
+            msi: pendingDelete.installmentsCount > 0,
+            total_ms: bqMs,
+            local_parse_ms: 0,
+            llm_provider: null,
+            llm_ms: 0,
+            bigquery_insert_ms: bqMs,
+            ok: true,
+            err_short: null
+          });
+
+          await tgSend(
+            chatId,
+            `✅ <b>Borrado</b>. Installments eliminados: ${result.deletedInstallments}.`
+          );
+        } catch (e) {
+          const bqMs = Date.now() - bqStart;
+          logPerf(
+            {
+              flow: "expense_delete",
+              chat_id: chatId,
+              msi: pendingDelete.installmentsCount > 0,
+              total_ms: bqMs,
+              local_parse_ms: 0,
+              llm_provider: null,
+              llm_ms: 0,
+              bigquery_insert_ms: bqMs,
+              ok: false,
+              err_short: shortError(e)
+            },
+            "warn"
+          );
+          await tgSend(chatId, "❌ <b>No se pudo borrar</b>.");
+        }
+
+        await answerCallbackQuery(cb.id);
+        return;
+      }
+
+      // ❌ Cancelar borrado
+      if (data === "delete_cancel") {
+        deleteByChat.delete(chatId);
+        await tgSend(chatId, "Cancelado.");
+        await answerCallbackQuery(cb.id);
+        return;
+      }
+
       // ❌ Cancelar
       if (data === "cancel") {
         draftByChat.delete(chatId);
@@ -122,15 +268,56 @@ app.post("/telegram-webhook", async (req, res) => {
           return;
         }
 
+        const perf = draft.__perf || {};
+        const localParseMs = Number(perf.local_parse_ms || 0);
+        const llmMs = Number(perf.llm_ms || 0);
+        const llmProvider = perf.llm_provider || String(LLM_PROVIDER || "local");
+        const bqStart = Date.now();
+
         try {
           const expenseId = await insertExpenseAndMaybeInstallments(draft, chatId);
           draftByChat.delete(chatId);
 
+          const bqMs = Date.now() - bqStart;
+          const totalMs = localParseMs + llmMs + bqMs;
+          logPerf({
+            flow: "expense_create",
+            chat_id: chatId,
+            msi: draft.is_msi === true,
+            total_ms: totalMs,
+            local_parse_ms: localParseMs,
+            llm_provider: llmProvider,
+            llm_ms: llmMs,
+            bigquery_insert_ms: bqMs,
+            ok: true,
+            err_short: null
+          });
+
+          const perfLine = PERF_TELEGRAM
+            ? `\n${formatPerfLine({ totalMs, llmMs, bqMs })}`
+            : "";
           await tgSend(
             chatId,
-            `✅ <b>Guardado</b>\nID: <code>${escapeHtml(expenseId)}</code>`
+            `✅ <b>Guardado</b>\nID: <code>${escapeHtml(expenseId)}</code>${perfLine}`
           );
         } catch (e) {
+          const bqMs = Date.now() - bqStart;
+          const totalMs = localParseMs + llmMs + bqMs;
+          logPerf(
+            {
+              flow: "expense_create",
+              chat_id: chatId,
+              msi: draft.is_msi === true,
+              total_ms: totalMs,
+              local_parse_ms: localParseMs,
+              llm_provider: llmProvider,
+              llm_ms: llmMs,
+              bigquery_insert_ms: bqMs,
+              ok: false,
+              err_short: shortError(e)
+            },
+            "warn"
+          );
           logBigQueryError(e);
           const pretty = formatBigQueryError(e);
           await tgSend(chatId, `❌ <b>No se pudo guardar</b>\n${escapeHtml(pretty)}`);
@@ -206,6 +393,7 @@ app.post("/telegram-webhook", async (req, res) => {
 
     if (low === "cancelar" || low === "/cancel") {
       draftByChat.delete(chatId);
+      deleteByChat.delete(chatId);
       await tgSend(chatId, "🧹 <b>Cancelado</b>.");
       return;
     }
@@ -217,17 +405,85 @@ app.post("/telegram-webhook", async (req, res) => {
         return;
       }
 
+      const perf = draft.__perf || {};
+      const localParseMs = Number(perf.local_parse_ms || 0);
+      const llmMs = Number(perf.llm_ms || 0);
+      const llmProvider = perf.llm_provider || String(LLM_PROVIDER || "local");
+      const bqStart = Date.now();
+
       try {
         const expenseId = await insertExpenseAndMaybeInstallments(draft, chatId);
         draftByChat.delete(chatId);
+        const bqMs = Date.now() - bqStart;
+        const totalMs = localParseMs + llmMs + bqMs;
+        logPerf({
+          flow: "expense_create",
+          chat_id: chatId,
+          msi: draft.is_msi === true,
+          total_ms: totalMs,
+          local_parse_ms: localParseMs,
+          llm_provider: llmProvider,
+          llm_ms: llmMs,
+          bigquery_insert_ms: bqMs,
+          ok: true,
+          err_short: null
+        });
+        const perfLine = PERF_TELEGRAM
+          ? `\n${formatPerfLine({ totalMs, llmMs, bqMs })}`
+          : "";
         await tgSend(
           chatId,
-          `✅ <b>Guardado</b>\nID: <code>${escapeHtml(expenseId)}</code>`
+          `✅ <b>Guardado</b>\nID: <code>${escapeHtml(expenseId)}</code>${perfLine}`
         );
       } catch (e) {
+        const bqMs = Date.now() - bqStart;
+        const totalMs = localParseMs + llmMs + bqMs;
+        logPerf(
+          {
+            flow: "expense_create",
+            chat_id: chatId,
+            msi: draft.is_msi === true,
+            total_ms: totalMs,
+            local_parse_ms: localParseMs,
+            llm_provider: llmProvider,
+            llm_ms: llmMs,
+            bigquery_insert_ms: bqMs,
+            ok: false,
+            err_short: shortError(e)
+          },
+          "warn"
+        );
         logBigQueryError(e);
         const pretty = formatBigQueryError(e);
         await tgSend(chatId, `❌ <b>No se pudo guardar</b>\n${escapeHtml(pretty)}`);
+      }
+      return;
+    }
+
+    const deleteMatch = text.match(/^(borrar|delete|rm)\s+(\S+)$/i);
+    if (deleteMatch) {
+      const expenseId = deleteMatch[2];
+      if (!isValidUuid(expenseId)) {
+        await tgSend(chatId, "UUID inválido. Ejemplo: <code>borrar 123e4567-e89b-12d3-a456-426614174000</code>.");
+        return;
+      }
+
+      try {
+        const expense = await getExpenseById({ chatId, expenseId });
+        if (!expense) {
+          await tgSend(chatId, "No encontré ese gasto para este chat.");
+          return;
+        }
+
+        const installmentsCount = await countInstallmentsForExpense({ chatId, expenseId });
+        deleteByChat.set(chatId, { expenseId, installmentsCount });
+
+        await tgSend(chatId, formatDeletePreview(expense, installmentsCount), {
+          reply_markup: deleteConfirmKeyboard()
+        });
+      } catch (e) {
+        logBigQueryError(e);
+        await tgSend(chatId, "❌ <b>No se pudo buscar el gasto</b>.");
       }
       return;
     }
@@ -306,10 +562,18 @@ app.post("/telegram-webhook", async (req, res) => {
       return;
     }
 
+    const llmStart = Date.now();
     const ai = await enrichExpenseLLM({ text, baseDraft: draft });
+    const llmMs = Date.now() - llmStart;
+    const llmProvider = String(LLM_PROVIDER || "local").toLowerCase();
     draft.category = ai.category;
     draft.merchant = ai.merchant;
     draft.description = ai.description;
+    draft.__perf = {
+      local_parse_ms: localParseMs,
+      llm_ms: llmMs,
+      llm_provider: llmProvider
+    };
 
     // =========================
     // FLUJO B: MSI (step 1)

@@ -363,3 +363,97 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
 
   return expenseId;
 }
+
+/* =======================
+ * Borrar gasto por ID (con cascade a MSI)
+ * ======================= */
+export async function getExpenseById({ chatId, expenseId }) {
+  const query = `
+    SELECT
+      id,
+      purchase_date,
+      amount_mxn,
+      payment_method,
+      category,
+      description,
+      is_msi,
+      msi_months,
+      msi_total_amount
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+    WHERE chat_id = @chat_id
+      AND id = @expense_id
+    LIMIT 1
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      expense_id: String(expenseId)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows?.[0] || null;
+}
+
+export async function countInstallmentsForExpense({ chatId, expenseId }) {
+  const query = `
+    SELECT COUNT(1) AS c
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+    WHERE chat_id = @chat_id
+      AND expense_id = @expense_id
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      expense_id: String(expenseId)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return Number(rows?.[0]?.c || 0);
+}
+
+export async function deleteExpenseCascade({ chatId, expenseId }) {
+  const query = `
+    DECLARE deleted_installments INT64 DEFAULT 0;
+    DECLARE deleted_expense INT64 DEFAULT 0;
+    BEGIN
+      DELETE FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+      WHERE chat_id = @chat_id
+        AND expense_id = @expense_id;
+      SET deleted_installments = @@row_count;
+
+      DELETE FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+      WHERE chat_id = @chat_id
+        AND id = @expense_id;
+      SET deleted_expense = @@row_count;
+    END;
+    SELECT
+      deleted_installments AS deleted_installments,
+      deleted_expense AS deleted_expense
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      expense_id: String(expenseId)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return {
+    deletedInstallments: Number(rows?.[0]?.deleted_installments || 0),
+    deletedExpense: Number(rows?.[0]?.deleted_expense || 0)
+  };
+}

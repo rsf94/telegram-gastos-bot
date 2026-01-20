@@ -77,3 +77,17 @@ export function editMenuKeyboard() {
     ]
   };
 }
+
+/**
+ * Confirmación de borrado
+ */
+export function deleteConfirmKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ Confirmar borrado", callback_data: "delete_confirm" },
+        { text: "❌ Cancelar", callback_data: "delete_cancel" }
+      ]
+    ]
+  };
+}
