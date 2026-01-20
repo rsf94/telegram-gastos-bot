@@ -4,11 +4,7 @@ import assert from "node:assert/strict";
 import { createMessageHandler } from "../src/handlers/messages.js";
 import { createCallbackHandler } from "../src/handlers/callbacks.js";
 import { saveExpense } from "../src/usecases/save_expense.js";
-import {
-  getDraft,
-  getPendingDelete,
-  __resetState
-} from "../src/state.js";
+import { getDraft, getPendingDelete, __resetState } from "../src/state.js";
 import { guessCategory } from "../src/parsing.js";
 
 function createMessageSpy() {
@@ -16,7 +12,10 @@ function createMessageSpy() {
   const sendMessage = async (chatId, text, extra) => {
     messages.push({ chatId, text, extra });
   };
-  return { sendMessage, messages };
+  const editMessage = async (chatId, messageId, text, extra) => {
+    messages.push({ chatId, messageId, text, extra, edited: true });
+  };
+  return { sendMessage, editMessage, messages };
 }
 
 function createAnswerSpy() {
@@ -41,10 +40,10 @@ test("normal flow", async () => {
   assert.ok(draft);
   assert.equal(draft.is_msi, false);
   assert.equal(draft.__state, "awaiting_payment_method");
-  assert.ok(messages.at(-1).text.includes("Confirmar gasto"));
+  assert.ok(messages.at(-1).text.includes("Elige método de pago"));
 });
 
-test("msi step1 prompts for months", async () => {
+test("msi step1 asks for payment method even without months", async () => {
   __resetState();
   const { sendMessage, messages } = createMessageSpy();
   const handler = createMessageHandler({
@@ -55,40 +54,72 @@ test("msi step1 prompts for months", async () => {
   await handler({ chat: { id: 2 }, text: "gasolina 1200 BBVA Platino a MSI" });
 
   const draft = getDraft("2");
-  assert.equal(draft.__state, "awaiting_msi_months");
-  assert.ok(messages.at(-1).text.includes("Detecté"));
+  assert.equal(draft.__state, "awaiting_payment_method");
+  assert.ok(messages.at(-1).text.includes("Elige método de pago"));
 });
 
 test("msi explicit months skips months question", async () => {
   __resetState();
-  const { sendMessage, messages } = createMessageSpy();
+  const { sendMessage, editMessage, messages } = createMessageSpy();
   const handler = createMessageHandler({
     sendMessage,
     getActiveCardNamesFn: async () => ["BBVA Platino"]
+  });
+  const { answerCallback } = createAnswerSpy();
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage,
+    answerCallback,
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    getBillingMonthForPurchaseFn: async () => "2026-02-01"
   });
 
   await handler({ chat: { id: 12 }, text: "amazon 6000 6msi" });
 
   const draft = getDraft("12");
   assert.equal(draft.__state, "awaiting_payment_method");
-  assert.ok(messages.at(-1).text.includes("Confirmar gasto"));
+  assert.ok(messages.at(-1).text.includes("Elige método de pago"));
+
+  await callbackHandler({
+    id: "cb12",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 12 }, message_id: 12 }
+  });
+  const updated = getDraft("12");
+  assert.equal(updated.msi_start_month, "2026-02-01");
 });
 
-test("msi step2 stores months and monthly amount", async () => {
+test("msi step2 stores months, monthly amount, and billing start month", async () => {
   __resetState();
-  const { sendMessage } = createMessageSpy();
+  const { sendMessage, editMessage, messages } = createMessageSpy();
   const handler = createMessageHandler({
     sendMessage,
-    getActiveCardNamesFn: async () => ["BBVA Platino"]
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    getBillingMonthForPurchaseFn: async () => "2026-02-01"
+  });
+  const { answerCallback } = createAnswerSpy();
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage,
+    answerCallback,
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    getBillingMonthForPurchaseFn: async () => "2026-02-01"
   });
 
   await handler({ chat: { id: 3 }, text: "gasolina 1200 BBVA Platino a MSI" });
+  await callbackHandler({
+    id: "cb3b",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 3 }, message_id: 33 }
+  });
   await handler({ chat: { id: 3 }, text: "6" });
 
   const draft = getDraft("3");
   assert.equal(draft.msi_months, 6);
   assert.equal(draft.amount_mxn, 200);
-  assert.equal(draft.__state, "awaiting_payment_method");
+  assert.equal(draft.msi_start_month, "2026-02-01");
+  assert.equal(draft.__state, "ready_to_confirm");
+  assert.ok(messages.at(-1).text.includes("Confirmar gasto"));
 });
 
 test("explicit date is preserved", async () => {
@@ -207,7 +238,7 @@ test("cancel draft clears state", async () => {
 
 test("normal flow choose payment and confirm", async () => {
   __resetState();
-  const { sendMessage, messages } = createMessageSpy();
+  const { sendMessage, editMessage, messages } = createMessageSpy();
   let saved = null;
   const handler = createMessageHandler({
     sendMessage,
@@ -236,6 +267,7 @@ test("normal flow choose payment and confirm", async () => {
   const { answerCallback } = createAnswerSpy();
   const callbackHandler = createCallbackHandler({
     sendMessage,
+    editMessage,
     answerCallback,
     saveExpenseFn,
     getActiveCardNamesFn: async () => ["BBVA Platino"]
@@ -245,7 +277,7 @@ test("normal flow choose payment and confirm", async () => {
   await callbackHandler({
     id: "cb3",
     data: "payment_method|BBVA Platino",
-    message: { chat: { id: 9 } }
+    message: { chat: { id: 9 }, message_id: 44 }
   });
   await callbackHandler({
     id: "cb4",
@@ -262,11 +294,12 @@ test("normal flow choose payment and confirm", async () => {
 
 test("msi flow months payment confirm", async () => {
   __resetState();
-  const { sendMessage, messages } = createMessageSpy();
+  const { sendMessage, editMessage, messages } = createMessageSpy();
   let saved = null;
   const handler = createMessageHandler({
     sendMessage,
-    getActiveCardNamesFn: async () => ["BBVA Platino"]
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    getBillingMonthForPurchaseFn: async () => "2026-02-01"
   });
 
   const saveExpenseFn = async ({ chatId, draft }) => {
@@ -291,18 +324,20 @@ test("msi flow months payment confirm", async () => {
   const { answerCallback } = createAnswerSpy();
   const callbackHandler = createCallbackHandler({
     sendMessage,
+    editMessage,
     answerCallback,
     saveExpenseFn,
-    getActiveCardNamesFn: async () => ["BBVA Platino"]
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    getBillingMonthForPurchaseFn: async () => "2026-02-01"
   });
 
   await handler({ chat: { id: 10 }, text: "amazon 6000 a msi" });
-  await handler({ chat: { id: 10 }, text: "6" });
   await callbackHandler({
     id: "cb5",
     data: "payment_method|BBVA Platino",
-    message: { chat: { id: 10 } }
+    message: { chat: { id: 10 }, message_id: 55 }
   });
+  await handler({ chat: { id: 10 }, text: "6" });
   await callbackHandler({
     id: "cb6",
     data: "confirm",
@@ -313,6 +348,7 @@ test("msi flow months payment confirm", async () => {
   assert.equal(saved.is_msi, true);
   assert.equal(saved.msi_months, 6);
   assert.equal(saved.payment_method, "BBVA Platino");
+  assert.equal(saved.msi_start_month, "2026-02-01");
   assert.ok(messages.some((msg) => msg.text.includes("ID: <code>exp-2</code>")));
 });
 
