@@ -9,6 +9,7 @@ import {
   processEnrichmentRetryQueue,
   runEnrichmentUpdateWithRetry
 } from "../src/usecases/enrichment_retry.js";
+import { buildLatestEnrichmentRetryQuery } from "../src/storage/bigquery.js";
 import { getDraft, getPendingDelete, __resetState } from "../src/state.js";
 import { guessCategory } from "../src/parsing.js";
 import { __resetConfirmIdempotency } from "../src/cache/confirm_idempotency.js";
@@ -545,8 +546,14 @@ test("enrichment retry enqueues after streaming buffer error", async () => {
   assert.equal(enqueuePayload.chatId, "50");
 });
 
-test("enrichment cron deletes task on success", async () => {
-  let deleted = null;
+test("enrichment retry query uses latest state window", async () => {
+  const query = buildLatestEnrichmentRetryQuery({ limit: 25 });
+  assert.ok(query.includes("QUALIFY ROW_NUMBER()"));
+  assert.ok(query.includes("PARTITION BY expense_id"));
+});
+
+test("enrichment cron records success events", async () => {
+  const inserts = [];
   const tasks = [
     {
       expense_id: "exp-60",
@@ -560,19 +567,79 @@ test("enrichment cron deletes task on success", async () => {
 
   const getDueEnrichmentRetryTasksFn = async () => tasks;
   const updateExpenseEnrichmentFn = async () => {};
-  const updateEnrichmentRetryTaskFn = async () => {};
-  const deleteEnrichmentRetryTaskFn = async ({ expenseId, chatId }) => {
-    deleted = { expenseId, chatId };
+  const getExpenseByIdFn = async () => ({
+    id: "exp-60",
+    raw_text: "Uber 123",
+    amount_mxn: "123",
+    payment_method: "BBVA",
+    purchase_date: "2024-01-01"
+  });
+  const enrichExpenseLLMFn = async () => ({
+    category: "Transport",
+    merchant: "Uber",
+    description: "Ride",
+    llm_provider: "gemini"
+  });
+  const insertEnrichmentRetryEventFn = async (payload) => {
+    inserts.push(payload);
   };
 
   const result = await processEnrichmentRetryQueue({
     limit: 1,
     getDueEnrichmentRetryTasksFn,
+    getExpenseByIdFn,
+    enrichExpenseLLMFn,
     updateExpenseEnrichmentFn,
-    updateEnrichmentRetryTaskFn,
-    deleteEnrichmentRetryTaskFn
+    insertEnrichmentRetryEventFn
   });
 
   assert.equal(result.processed, 1);
-  assert.deepEqual(deleted, { expenseId: "exp-60", chatId: "60" });
+  assert.equal(result.succeeded, 1);
+  assert.ok(inserts.some((row) => row.status === "RUNNING"));
+  assert.ok(inserts.some((row) => row.status === "SUCCEEDED"));
+});
+
+test("enrichment cron handles streaming buffer errors without throwing", async () => {
+  const inserts = [];
+  const tasks = [
+    {
+      expense_id: "exp-70",
+      chat_id: "70",
+      attempts: 1
+    }
+  ];
+
+  const getDueEnrichmentRetryTasksFn = async () => tasks;
+  const getExpenseByIdFn = async () => ({
+    id: "exp-70",
+    raw_text: "Comida 200",
+    amount_mxn: "200",
+    payment_method: "BBVA",
+    purchase_date: "2024-01-01"
+  });
+  const enrichExpenseLLMFn = async () => ({
+    category: "Food",
+    merchant: "Tacos",
+    description: "Cena",
+    llm_provider: "gemini"
+  });
+  const updateExpenseEnrichmentFn = async () => {
+    throw new Error("would affect rows in the streaming buffer");
+  };
+  const insertEnrichmentRetryEventFn = async (payload) => {
+    inserts.push(payload);
+  };
+
+  const result = await processEnrichmentRetryQueue({
+    limit: 1,
+    getDueEnrichmentRetryTasksFn,
+    getExpenseByIdFn,
+    enrichExpenseLLMFn,
+    updateExpenseEnrichmentFn,
+    insertEnrichmentRetryEventFn
+  });
+
+  assert.equal(result.processed, 1);
+  assert.equal(result.failed, 1);
+  assert.ok(inserts.some((row) => row.status === "FAILED"));
 });

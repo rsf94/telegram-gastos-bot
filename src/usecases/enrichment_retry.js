@@ -1,3 +1,7 @@
+import crypto from "crypto";
+import { enrichExpenseLLM } from "../gemini.js";
+import { getExpenseById, insertEnrichmentRetryEvent } from "../storage/bigquery.js";
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -131,7 +135,7 @@ export async function runEnrichmentUpdateWithRetry({
 }
 
 function cronBackoffMsForAttempt(attempt) {
-  const delays = [5, 15, 30, 60].map((minutes) => minutes * 60 * 1000);
+  const delays = [30, 60, 120, 240, 480, 1440].map((minutes) => minutes * 60 * 1000);
   const idx = Math.max(0, Math.min(attempt - 1, delays.length - 1));
   return delays[idx];
 }
@@ -139,97 +143,183 @@ function cronBackoffMsForAttempt(attempt) {
 export async function processEnrichmentRetryQueue({
   limit = 50,
   getDueEnrichmentRetryTasksFn,
+  getExpenseByIdFn = getExpenseById,
+  enrichExpenseLLMFn = enrichExpenseLLM,
   updateExpenseEnrichmentFn,
-  updateEnrichmentRetryTaskFn,
-  deleteEnrichmentRetryTaskFn,
-  nowFn = () => new Date()
+  insertEnrichmentRetryEventFn = insertEnrichmentRetryEvent,
+  nowFn = () => new Date(),
+  runId = crypto.randomUUID()
 }) {
-  const tasks = await getDueEnrichmentRetryTasksFn({ limit, now: nowFn() });
+  const now = nowFn();
+  const tasks = await getDueEnrichmentRetryTasksFn({ limit, now });
+  let succeeded = 0;
+  let failed = 0;
+  let skipped = 0;
+  let llmMsTotal = 0;
+  let bqMsTotal = 0;
+  const llmProviders = new Set();
 
   for (const task of tasks) {
-    const attempt = Number(task.attempts || 0) + 1;
-    const updateStart = Date.now();
-    try {
-      await updateExpenseEnrichmentFn({
-        chatId: task.chat_id,
-        expenseId: task.expense_id,
-        category: task.category,
-        merchant: task.merchant,
-        description: task.description
-      });
-      const bqUpdateMs = Date.now() - updateStart;
-      logEnrichRetry({
-        expenseId: task.expense_id,
-        attempt,
-        status: "success",
-        reason: "ok",
-        nextAttemptAt: null,
-        bqUpdateMs
-      });
-      await deleteEnrichmentRetryTaskFn({
-        expenseId: task.expense_id,
-        chatId: task.chat_id
-      });
+    if (!task?.expense_id || !task?.chat_id) {
+      skipped += 1;
       continue;
+    }
+
+    const attempt = Number(task.attempts || 0) + 1;
+    const runningStart = Date.now();
+    await insertEnrichmentRetryEventFn({
+      expenseId: task.expense_id,
+      chatId: task.chat_id,
+      attempts: attempt,
+      nextAttemptAt: now.toISOString(),
+      lastError: null,
+      status: "RUNNING",
+      runId
+    });
+    bqMsTotal += Date.now() - runningStart;
+
+    let expense = null;
+    try {
+      expense = await getExpenseByIdFn({
+        chatId: task.chat_id,
+        expenseId: task.expense_id
+      });
     } catch (error) {
-      const bqUpdateMs = Date.now() - updateStart;
       const reason = shortError(error);
-      const retryable = isRetryableEnrichmentError(error);
-      const updatedAttempts = attempt;
-
-      if (!retryable) {
-        logEnrichRetry({
-          expenseId: task.expense_id,
-          attempt,
-          status: "fail",
-          reason: `non_retryable:${reason}`,
-          nextAttemptAt: null,
-          bqUpdateMs
-        });
-        await deleteEnrichmentRetryTaskFn({
-          expenseId: task.expense_id,
-          chatId: task.chat_id
-        });
-        continue;
-      }
-
-      if (updatedAttempts > 10) {
-        logEnrichRetry({
-          expenseId: task.expense_id,
-          attempt,
-          status: "dead",
-          reason,
-          nextAttemptAt: null,
-          bqUpdateMs
-        });
-        await deleteEnrichmentRetryTaskFn({
-          expenseId: task.expense_id,
-          chatId: task.chat_id
-        });
-        continue;
-      }
-
-      const delayMs = cronBackoffMsForAttempt(updatedAttempts);
+      const delayMs = cronBackoffMsForAttempt(attempt);
       const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
-      await updateEnrichmentRetryTaskFn({
+      const insertStart = Date.now();
+      await insertEnrichmentRetryEventFn({
         expenseId: task.expense_id,
         chatId: task.chat_id,
-        attempts: updatedAttempts,
+        attempts: attempt,
         nextAttemptAt,
-        lastError: reason
+        lastError: reason,
+        status: "FAILED",
+        runId
       });
-      logEnrichRetry({
-        expenseId: task.expense_id,
-        attempt,
-        status: "fail",
-        reason,
-        nextAttemptAt,
-        bqUpdateMs
-      });
+      bqMsTotal += Date.now() - insertStart;
+      failed += 1;
+      continue;
     }
+
+    if (!expense) {
+      const reason = "expense_not_found";
+      const delayMs = cronBackoffMsForAttempt(attempt);
+      const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
+      const insertStart = Date.now();
+      await insertEnrichmentRetryEventFn({
+        expenseId: task.expense_id,
+        chatId: task.chat_id,
+        attempts: attempt,
+        nextAttemptAt,
+        lastError: reason,
+        status: "FAILED",
+        runId
+      });
+      bqMsTotal += Date.now() - insertStart;
+      failed += 1;
+      continue;
+    }
+
+    let enrichment = null;
+    const llmStart = Date.now();
+    try {
+      const ai = await enrichExpenseLLMFn({
+        text: expense.raw_text || "",
+        baseDraft: expense
+      });
+      enrichment = {
+        category: ai.category,
+        merchant: ai.merchant,
+        description: ai.description
+      };
+      llmProviders.add(ai.llm_provider || "unknown");
+      llmMsTotal += Date.now() - llmStart;
+    } catch (error) {
+      llmMsTotal += Date.now() - llmStart;
+      const reason = shortError(error);
+      const delayMs = cronBackoffMsForAttempt(attempt);
+      const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
+      const insertStart = Date.now();
+      await insertEnrichmentRetryEventFn({
+        expenseId: task.expense_id,
+        chatId: task.chat_id,
+        attempts: attempt,
+        nextAttemptAt,
+        lastError: reason,
+        status: "FAILED",
+        runId
+      });
+      bqMsTotal += Date.now() - insertStart;
+      failed += 1;
+      continue;
+    }
+
+    if (updateExpenseEnrichmentFn) {
+      const updateStart = Date.now();
+      try {
+        await updateExpenseEnrichmentFn({
+          chatId: task.chat_id,
+          expenseId: task.expense_id,
+          category: enrichment.category,
+          merchant: enrichment.merchant,
+          description: enrichment.description
+        });
+        bqMsTotal += Date.now() - updateStart;
+      } catch (error) {
+        bqMsTotal += Date.now() - updateStart;
+        const reason = shortError(error);
+        const retryable = isRetryableEnrichmentError(error);
+        const delayMs = cronBackoffMsForAttempt(attempt);
+        const nextAttemptAt = retryable
+          ? new Date(nowFn().getTime() + delayMs).toISOString()
+          : new Date(nowFn().getTime() + cronBackoffMsForAttempt(6)).toISOString();
+        const insertStart = Date.now();
+        await insertEnrichmentRetryEventFn({
+          expenseId: task.expense_id,
+          chatId: task.chat_id,
+          attempts: attempt,
+          nextAttemptAt,
+          lastError: retryable ? reason : `non_retryable:${reason}`,
+          status: "FAILED",
+          runId,
+          category: enrichment.category,
+          merchant: enrichment.merchant,
+          description: enrichment.description
+        });
+        bqMsTotal += Date.now() - insertStart;
+        failed += 1;
+        continue;
+      }
+    }
+
+    const successStart = Date.now();
+    await insertEnrichmentRetryEventFn({
+      expenseId: task.expense_id,
+      chatId: task.chat_id,
+      attempts: attempt,
+      nextAttemptAt: null,
+      lastError: null,
+      status: "SUCCEEDED",
+      runId,
+      category: enrichment.category,
+      merchant: enrichment.merchant,
+      description: enrichment.description
+    });
+    bqMsTotal += Date.now() - successStart;
+    succeeded += 1;
   }
 
-  return { processed: tasks.length };
+  return {
+    processed: tasks.length,
+    succeeded,
+    failed,
+    skipped,
+    llmMs: llmMsTotal,
+    bqMs: bqMsTotal,
+    llmProviders: Array.from(llmProviders)
+  };
 }
 
 export { isRetryableEnrichmentError };
