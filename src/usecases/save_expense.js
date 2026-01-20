@@ -2,10 +2,12 @@ import crypto from "crypto";
 import { LLM_PROVIDER } from "../config.js";
 import {
   insertExpenseAndMaybeInstallments,
-  updateExpenseEnrichment
+  updateExpenseEnrichment,
+  enqueueEnrichmentRetry
 } from "../storage/bigquery.js";
 import { escapeHtml, tgSend } from "../telegram.js";
 import { enrichExpenseLLM } from "../gemini.js";
+import { runEnrichmentUpdateWithRetry } from "./enrichment_retry.js";
 import {
   getIdempotencyEntry,
   setIdempotencyPending,
@@ -74,6 +76,7 @@ export async function saveExpense({
   insertExpense = insertExpenseAndMaybeInstallments,
   sendMessage = tgSend,
   updateExpenseEnrichmentFn = updateExpenseEnrichment,
+  enqueueEnrichmentRetryFn = enqueueEnrichmentRetry,
   enrichExpenseLLMFn = enrichExpenseLLM,
   llmProviderEnv = LLM_PROVIDER
 }) {
@@ -142,12 +145,14 @@ export async function saveExpense({
               };
 
         const updateStart = Date.now();
-        await updateExpenseEnrichmentFn({
+        const updateResult = await runEnrichmentUpdateWithRetry({
           chatId,
           expenseId,
           category: enrichment.category,
           merchant: enrichment.merchant,
-          description: enrichment.description
+          description: enrichment.description,
+          updateExpenseEnrichmentFn,
+          enqueueEnrichmentRetryFn
         });
         bqUpdateMs = Date.now() - updateStart;
 
@@ -161,7 +166,8 @@ export async function saveExpense({
           total_ms: totalMs,
           llm_provider: llmProvider,
           cache_hit: { card_rules: cacheHitCardRules, llm: llmCacheHit },
-          used_fallback: usedFallback
+          used_fallback: usedFallback,
+          enrichment_update_ok: updateResult.ok
         });
       } catch (error) {
         llmMs = Date.now() - llmStart;

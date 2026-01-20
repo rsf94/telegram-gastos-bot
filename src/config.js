@@ -8,6 +8,8 @@ export const LLM_FALLBACK = process.env.LLM_FALLBACK;
 export const BQ_PROJECT_ID = process.env.BQ_PROJECT_ID || "project-c9256c63-847c-4b18-ac8";
 export const BQ_DATASET = process.env.BQ_DATASET || "gastos";
 export const BQ_TABLE = process.env.BQ_TABLE || "expenses";
+export const BQ_ENRICHMENT_RETRY_TABLE =
+  process.env.BQ_ENRICHMENT_RETRY_TABLE || "enrichment_retry";
 
 export const ALLOWED_PAYMENT_METHODS = [
   "Banorte Platino",

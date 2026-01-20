@@ -4,6 +4,13 @@ import { warnMissingEnv } from "./config.js";
 import { runDailyCardReminders } from "./reminders.js";
 import { createCallbackHandler } from "./handlers/callbacks.js";
 import { createMessageHandler } from "./handlers/messages.js";
+import {
+  deleteEnrichmentRetryTask,
+  getDueEnrichmentRetries,
+  updateEnrichmentRetryTask,
+  updateExpenseEnrichment
+} from "./storage/bigquery.js";
+import { processEnrichmentRetryQueue } from "./usecases/enrichment_retry.js";
 
 warnMissingEnv();
 
@@ -48,6 +55,30 @@ app.get("/cron/daily", async (req, res) => {
 
     const force = String(req.query.force || "") === "1";
     await runDailyCardReminders({ force });
+
+    return res.status(200).send("ok");
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("error");
+  }
+});
+
+// ===== CRON: enrichment retry =====
+app.get("/cron/enrich", async (req, res) => {
+  try {
+    const token = String(req.query.token || "");
+    if (!process.env.CRON_TOKEN || token !== process.env.CRON_TOKEN) {
+      return res.status(401).send("unauthorized");
+    }
+
+    const limit = Number(req.query.limit || 50);
+    await processEnrichmentRetryQueue({
+      limit,
+      getDueEnrichmentRetryTasksFn: getDueEnrichmentRetries,
+      updateExpenseEnrichmentFn: updateExpenseEnrichment,
+      updateEnrichmentRetryTaskFn: updateEnrichmentRetryTask,
+      deleteEnrichmentRetryTaskFn: deleteEnrichmentRetryTask
+    });
 
     return res.status(200).send("ok");
   } catch (e) {
