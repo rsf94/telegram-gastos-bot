@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { LLM_PROVIDER } from "../config.js";
 import {
   insertExpenseAndMaybeInstallments,
@@ -5,6 +6,12 @@ import {
 } from "../storage/bigquery.js";
 import { escapeHtml, tgSend } from "../telegram.js";
 import { enrichExpenseLLM } from "../gemini.js";
+import {
+  getIdempotencyEntry,
+  setIdempotencyPending,
+  setIdempotencySaved,
+  clearIdempotencyEntry
+} from "../cache/confirm_idempotency.js";
 
 function formatBigQueryError(e) {
   if (!e) return "Error desconocido";
@@ -46,6 +53,21 @@ function logPerf(payload, level = "log") {
   }
 }
 
+function buildIdempotencyKey({ chatId, draft }) {
+  const payload = [
+    String(chatId),
+    draft.raw_text || "",
+    draft.purchase_date || "",
+    draft.payment_method || "",
+    String(draft.amount_mxn ?? ""),
+    draft.is_msi ? "1" : "0",
+    String(draft.msi_months ?? ""),
+    String(draft.msi_total_amount ?? "")
+  ].join("||");
+
+  return crypto.createHash("sha256").update(payload).digest("hex");
+}
+
 export async function saveExpense({
   chatId,
   draft,
@@ -59,9 +81,31 @@ export async function saveExpense({
   const parseMs = Number(perf.parse_ms || 0);
   const bqStart = Date.now();
   const preferredProvider = String(llmProviderEnv || "local");
+  const cacheHitCardRules = perf.cache_hit?.card_rules ?? null;
 
   try {
+    const idempotencyKey = buildIdempotencyKey({ chatId, draft });
+    const cached = getIdempotencyEntry(idempotencyKey);
+    if (cached?.status === "saved" || cached?.status === "pending") {
+      const idText = cached?.expenseId
+        ? ` ID: <code>${escapeHtml(cached.expenseId)}</code>`
+        : "";
+      await sendMessage(chatId, `✅ Ya estaba guardado.${idText}`);
+      logPerf({
+        flow: draft.is_msi ? "msi" : "normal",
+        local_parse_ms: parseMs,
+        llm_ms: 0,
+        bq_ms: 0,
+        total_ms: parseMs,
+        llm_provider: preferredProvider,
+        cache_hit: { card_rules: cacheHitCardRules, llm: false }
+      });
+      return { ok: true, expenseId: cached?.expenseId || null, alreadySaved: true };
+    }
+
+    setIdempotencyPending(idempotencyKey);
     const expenseId = await insertExpense(draft, chatId);
+    setIdempotencySaved(idempotencyKey, expenseId);
     const bqInsertMs = Date.now() - bqStart;
     await sendMessage(
       chatId,
@@ -82,6 +126,7 @@ export async function saveExpense({
         llmMs = Date.now() - llmStart;
         llmProvider = ai.llm_provider || llmProvider;
         usedFallback = llmProvider !== preferredProvider;
+        const llmCacheHit = Boolean(ai.cache_hit);
 
         const enrichment =
           llmProvider === "local"
@@ -106,29 +151,31 @@ export async function saveExpense({
         });
         bqUpdateMs = Date.now() - updateStart;
 
-        const totalMs = parseMs + bqInsertMs + llmMs + bqUpdateMs;
+        const bqMs = bqInsertMs + bqUpdateMs;
+        const totalMs = parseMs + llmMs + bqMs;
         logPerf({
           flow,
-          parse_ms: parseMs,
-          bq_insert_ms: bqInsertMs,
+          local_parse_ms: parseMs,
           llm_ms: llmMs,
-          bq_update_ms: bqUpdateMs,
+          bq_ms: bqMs,
           total_ms: totalMs,
           llm_provider: llmProvider,
+          cache_hit: { card_rules: cacheHitCardRules, llm: llmCacheHit },
           used_fallback: usedFallback
         });
       } catch (error) {
         llmMs = Date.now() - llmStart;
-        const totalMs = parseMs + bqInsertMs + llmMs + bqUpdateMs;
+        const bqMs = bqInsertMs + bqUpdateMs;
+        const totalMs = parseMs + llmMs + bqMs;
         logPerf(
           {
             flow,
-            parse_ms: parseMs,
-            bq_insert_ms: bqInsertMs,
+            local_parse_ms: parseMs,
             llm_ms: llmMs,
-            bq_update_ms: bqUpdateMs,
+            bq_ms: bqMs,
             total_ms: totalMs,
             llm_provider: llmProvider,
+            cache_hit: { card_rules: cacheHitCardRules, llm: false },
             used_fallback,
             err_short: shortError(error)
           },
@@ -139,17 +186,23 @@ export async function saveExpense({
 
     return { ok: true, expenseId };
   } catch (e) {
+    try {
+      const idempotencyKey = buildIdempotencyKey({ chatId, draft });
+      clearIdempotencyEntry(idempotencyKey);
+    } catch (_) {
+      // ignore cleanup errors
+    }
     const bqInsertMs = Date.now() - bqStart;
     const flow = draft?.is_msi ? "msi" : "normal";
     logPerf(
       {
         flow,
-        parse_ms: parseMs,
-        bq_insert_ms: bqInsertMs,
+        local_parse_ms: parseMs,
         llm_ms: 0,
-        bq_update_ms: 0,
+        bq_ms: bqInsertMs,
         total_ms: parseMs + bqInsertMs,
         llm_provider: preferredProvider,
+        cache_hit: { card_rules: cacheHitCardRules, llm: false },
         used_fallback: false,
         err_short: shortError(e)
       },

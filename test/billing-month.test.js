@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+
 const rules = new Map();
 
 function setRule({ chatId, cardName, cutDay, shift }) {
@@ -9,48 +10,10 @@ function setRule({ chatId, cardName, cutDay, shift }) {
   });
 }
 
-function calcMonth({ baseDate, shift }) {
-  const year = baseDate.getUTCFullYear();
-  const month = baseDate.getUTCMonth();
-  const shifted = new Date(Date.UTC(year, month + shift, 1, 12, 0, 0));
-  return shifted.toISOString().slice(0, 10);
-}
-
-class FakeBigQuery {
-  async createQueryJob(options) {
-    const { query, params } = options;
-    const key = `${params.chat_id}|${params.card_name}`;
-    const rule = rules.get(key);
-    const rows = [];
-    if (rule) {
-      const purchaseDate = new Date(`${params.purchase_date}T00:00:00Z`);
-      const purchaseMonth = new Date(
-        Date.UTC(purchaseDate.getUTCFullYear(), purchaseDate.getUTCMonth(), 1, 12, 0, 0)
-      );
-      let baseMonth = purchaseMonth;
-      if (query.includes("EXTRACT(DAY") && query.includes("> cut_day")) {
-        if (purchaseDate.getUTCDate() > rule.cut_day) {
-          baseMonth = new Date(
-            Date.UTC(purchaseMonth.getUTCFullYear(), purchaseMonth.getUTCMonth() + 1, 1, 12, 0, 0)
-          );
-        }
-      }
-      rows.push({
-        billing_month: calcMonth({
-          baseDate: baseMonth,
-          shift: rule.billing_shift_months
-        })
-      });
-    }
-    return [
-      {
-        async getQueryResults() {
-          return [rows];
-        }
-      }
-    ];
-  }
-}
+const getCardRuleFn = async (chatId, cardName) => {
+  const rule = rules.get(`${chatId}|${cardName}`) || null;
+  return { rule, cacheHit: true };
+};
 
 const { getBillingMonthForPurchase } = await import("../src/storage/bigquery.js");
 
@@ -60,7 +23,7 @@ test("billing month respects cut_day BBVA (after cut)", async () => {
     chatId: "1",
     cardName: "BBVA Platino",
     purchaseDateISO: "2026-01-19",
-    bqClient: new FakeBigQuery()
+    getCardRuleFn
   });
   assert.equal(billingMonth, "2026-02-01");
 });
@@ -71,7 +34,7 @@ test("billing month respects cut_day BBVA (on cut)", async () => {
     chatId: "2",
     cardName: "BBVA Platino",
     purchaseDateISO: "2026-01-02",
-    bqClient: new FakeBigQuery()
+    getCardRuleFn
   });
   assert.equal(billingMonth, "2026-01-01");
 });
@@ -82,7 +45,7 @@ test("billing month respects cut_day Santander", async () => {
     chatId: "3",
     cardName: "Santander",
     purchaseDateISO: "2026-01-11",
-    bqClient: new FakeBigQuery()
+    getCardRuleFn
   });
   assert.equal(billingMonth, "2026-02-01");
 });
@@ -93,7 +56,7 @@ test("billing month supports negative shift (Klar)", async () => {
     chatId: "4",
     cardName: "Klar",
     purchaseDateISO: "2026-01-19",
-    bqClient: new FakeBigQuery()
+    getCardRuleFn
   });
   assert.equal(billingMonth, "2025-12-01");
 });

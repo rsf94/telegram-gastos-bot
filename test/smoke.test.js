@@ -4,8 +4,16 @@ import assert from "node:assert/strict";
 import { createMessageHandler } from "../src/handlers/messages.js";
 import { createCallbackHandler } from "../src/handlers/callbacks.js";
 import { saveExpense } from "../src/usecases/save_expense.js";
+import { deleteExpense } from "../src/usecases/delete_expense.js";
 import { getDraft, getPendingDelete, __resetState } from "../src/state.js";
 import { guessCategory } from "../src/parsing.js";
+import { __resetConfirmIdempotency } from "../src/cache/confirm_idempotency.js";
+import {
+  __resetCardRulesCache,
+  __setFetchActiveRules,
+  getCardRule,
+  getActiveCardNames
+} from "../src/cache/card_rules_cache.js";
 
 function createMessageSpy() {
   const messages = [];
@@ -372,4 +380,132 @@ test("category mapping rules", () => {
   assert.equal(guessCategory("Spotify suscripcion"), "Subscriptions");
   assert.equal(guessCategory("Pemex gasolina"), "Gas");
   assert.equal(guessCategory("Palacio de Hierro compra"), "Clothing");
+});
+
+test("msi step2 does not call saveExpense", async () => {
+  __resetState();
+  const { sendMessage, editMessage } = createMessageSpy();
+  let saveCalls = 0;
+
+  const handler = createMessageHandler({
+    sendMessage,
+    saveExpenseFn: async () => {
+      saveCalls += 1;
+      return { ok: true, expenseId: "exp-msi" };
+    },
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    getBillingMonthForPurchaseFn: async () => "2026-02-01"
+  });
+
+  const { answerCallback } = createAnswerSpy();
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage,
+    answerCallback,
+    getActiveCardNamesFn: async () => ["BBVA Platino"]
+  });
+
+  await handler({ chat: { id: 13 }, text: "gasolina 1200 BBVA Platino a MSI" });
+  await callbackHandler({
+    id: "cb13",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 13 }, message_id: 13 }
+  });
+  await handler({ chat: { id: 13 }, text: "6" });
+
+  assert.equal(saveCalls, 0);
+});
+
+test("confirm idempotency prevents duplicate inserts", async () => {
+  __resetConfirmIdempotency();
+  const { sendMessage, messages } = createMessageSpy();
+  let insertCount = 0;
+
+  const draft = {
+    raw_text: "pizza 100",
+    purchase_date: "2024-01-01",
+    payment_method: "BBVA Platino",
+    amount_mxn: 100,
+    category: "Other",
+    merchant: "",
+    description: "Test",
+    is_msi: false,
+    msi_months: null,
+    msi_total_amount: null,
+    __perf: { parse_ms: 5, cache_hit: { card_rules: true, llm: null } }
+  };
+
+  const insertExpense = async () => {
+    insertCount += 1;
+    return "exp-1";
+  };
+
+  await saveExpense({
+    chatId: "20",
+    draft,
+    sendMessage,
+    insertExpense,
+    updateExpenseEnrichmentFn: async () => {},
+    enrichExpenseLLMFn: async ({ baseDraft }) => ({
+      llm_provider: "local",
+      category: baseDraft.category,
+      merchant: baseDraft.merchant,
+      description: baseDraft.description,
+      cache_hit: false
+    }),
+    llmProviderEnv: "local"
+  });
+
+  await saveExpense({
+    chatId: "20",
+    draft,
+    sendMessage,
+    insertExpense,
+    updateExpenseEnrichmentFn: async () => {},
+    enrichExpenseLLMFn: async () => {
+      throw new Error("LLM should not be called");
+    },
+    llmProviderEnv: "local"
+  });
+
+  assert.equal(insertCount, 1);
+  assert.ok(messages.some((msg) => msg.text.includes("Ya estaba guardado")));
+});
+
+test("delete removes installments and expense", async () => {
+  const { sendMessage, messages } = createMessageSpy();
+  const result = await deleteExpense({
+    chatId: "30",
+    pendingDelete: { expenseId: "exp-30" },
+    deleteExpenseFn: async () => ({
+      deletedInstallments: 3,
+      deletedExpense: 1
+    }),
+    sendMessage
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(messages.at(-1).text.includes("Installments eliminados: 3"));
+});
+
+test("card rules cache avoids repeated fetches", async () => {
+  __resetCardRulesCache();
+  let fetchCount = 0;
+  __setFetchActiveRules(async () => {
+    fetchCount += 1;
+    return [
+      {
+        chat_id: "40",
+        card_name: "BBVA Platino",
+        cut_day: 5,
+        billing_shift_months: 0
+      }
+    ];
+  });
+
+  await getCardRule("40", "BBVA Platino");
+  await getActiveCardNames("40");
+  await getCardRule("40", "BBVA Platino");
+
+  assert.equal(fetchCount, 1);
 });

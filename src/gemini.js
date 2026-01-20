@@ -14,10 +14,14 @@ import { callDeepSeekEnrich, validateDeepSeekEnrich } from "./deepseek.js";
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const llmCache = new Map();
 
-function buildCacheKey(text, paymentMethod) {
+function buildCacheKey(text, baseDraft) {
+  const paymentMethod = baseDraft?.payment_method || "";
+  const purchaseDate = baseDraft?.purchase_date || "";
+  const isMsi = baseDraft?.is_msi ? "1" : "0";
+  const msiMonths = baseDraft?.msi_months ?? "";
   return crypto
     .createHash("sha256")
-    .update(`${text || ""}||${paymentMethod || ""}`)
+    .update(`${text || ""}||${paymentMethod}||${purchaseDate}||${isMsi}||${msiMonths}`)
     .digest("hex");
 }
 
@@ -169,23 +173,23 @@ function resolveFallbackPreference() {
 }
 
 export async function enrichExpenseLLM({ text, todayISO = todayISOInTZ(), baseDraft }) {
-  const cacheKey = buildCacheKey(text, baseDraft?.payment_method);
+  const cacheKey = buildCacheKey(text, baseDraft);
   const cached = getCachedEntry(cacheKey);
-  if (cached) return cached;
+  if (cached) return { ...cached, cache_hit: true };
 
   const fallback = { ...buildFallback(text, baseDraft), llm_provider: "local" };
   const provider = String(LLM_PROVIDER || "gemini").toLowerCase();
 
   if (provider !== "gemini") {
     setCachedEntry(cacheKey, fallback);
-    return fallback;
+    return { ...fallback, cache_hit: false };
   }
 
   try {
     const completion = await callGeminiComplete({ text, todayISO });
     const result = { ...completion, llm_provider: "gemini" };
     setCachedEntry(cacheKey, result);
-    return result;
+    return { ...result, cache_hit: false };
   } catch (error) {
     const fallbackPref = resolveFallbackPreference();
     if (fallbackPref === "deepseek" && DEEPSEEK_API_KEY) {
@@ -210,19 +214,19 @@ export async function enrichExpenseLLM({ text, todayISO = todayISOInTZ(), baseDr
         );
         const result = { ...validation.draft, llm_provider: "deepseek" };
         setCachedEntry(cacheKey, result);
-        return result;
+        return { ...result, cache_hit: false };
       } catch (deepseekError) {
         const durationMs = Date.now() - start;
         console.warn(
           `LLM fallback=local durationMs=${durationMs} error=${shortError(deepseekError)}`
         );
         setCachedEntry(cacheKey, fallback);
-        return fallback;
+        return { ...fallback, cache_hit: false };
       }
     }
 
     console.warn(`LLM fallback=local durationMs=0 error=${shortError(error)}`);
     setCachedEntry(cacheKey, fallback);
-    return fallback;
+    return { ...fallback, cache_hit: false };
   }
 }
