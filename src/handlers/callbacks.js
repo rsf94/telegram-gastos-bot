@@ -4,7 +4,8 @@ import {
   getDraft,
   clearDraft,
   getPendingDelete,
-  clearPendingDelete
+  clearPendingDelete,
+  setLastExpenseId
 } from "../state.js";
 import { saveExpense } from "../usecases/save_expense.js";
 import { deleteExpense } from "../usecases/delete_expense.js";
@@ -77,6 +78,7 @@ export function createCallbackHandler({
 
       const result = await saveExpenseFn({ chatId, draft });
       if (result.ok) {
+        setLastExpenseId(chatId, result.expenseId);
         clearDraft(chatId);
       }
 

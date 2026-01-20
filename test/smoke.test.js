@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { createMessageHandler } from "../src/handlers/messages.js";
 import { createCallbackHandler } from "../src/handlers/callbacks.js";
+import { saveExpense } from "../src/usecases/save_expense.js";
 import {
   getDraft,
   getPendingDelete,
@@ -56,6 +57,21 @@ test("msi step1 prompts for months", async () => {
   const draft = getDraft("2");
   assert.equal(draft.__state, "awaiting_msi_months");
   assert.ok(messages.at(-1).text.includes("Detecté"));
+});
+
+test("msi explicit months skips months question", async () => {
+  __resetState();
+  const { sendMessage, messages } = createMessageSpy();
+  const handler = createMessageHandler({
+    sendMessage,
+    getActiveCardNamesFn: async () => ["BBVA Platino"]
+  });
+
+  await handler({ chat: { id: 12 }, text: "amazon 6000 6msi" });
+
+  const draft = getDraft("12");
+  assert.equal(draft.__state, "awaiting_payment_method");
+  assert.ok(messages.at(-1).text.includes("Confirmar gasto"));
 });
 
 test("msi step2 stores months and monthly amount", async () => {
@@ -198,14 +214,30 @@ test("normal flow choose payment and confirm", async () => {
     getActiveCardNamesFn: async () => ["BBVA Platino"]
   });
 
+  const saveExpenseFn = async ({ chatId, draft }) => {
+    const result = await saveExpense({
+      chatId,
+      draft,
+      sendMessage,
+      insertExpense: async () => "exp-1",
+      updateExpenseEnrichmentFn: async () => {},
+      enrichExpenseLLMFn: async ({ baseDraft }) => ({
+        llm_provider: "local",
+        category: baseDraft.category,
+        merchant: baseDraft.merchant,
+        description: baseDraft.description
+      }),
+      llmProviderEnv: "local"
+    });
+    saved = draft;
+    return result;
+  };
+
   const { answerCallback } = createAnswerSpy();
   const callbackHandler = createCallbackHandler({
     sendMessage,
     answerCallback,
-    saveExpenseFn: async ({ draft }) => {
-      saved = draft;
-      return { ok: true, expenseId: "exp-1" };
-    },
+    saveExpenseFn,
     getActiveCardNamesFn: async () => ["BBVA Platino"]
   });
 
@@ -224,26 +256,43 @@ test("normal flow choose payment and confirm", async () => {
   assert.ok(saved);
   assert.equal(saved.payment_method, "BBVA Platino");
   assert.equal(saved.__state, "ready_to_confirm");
-  assert.ok(messages.at(-1).text.includes("Confirmar gasto"));
+  assert.ok(messages.some((msg) => msg.text.includes("Confirmar gasto")));
+  assert.ok(messages.some((msg) => msg.text.includes("ID: <code>exp-1</code>")));
 });
 
 test("msi flow months payment confirm", async () => {
   __resetState();
-  const { sendMessage } = createMessageSpy();
+  const { sendMessage, messages } = createMessageSpy();
   let saved = null;
   const handler = createMessageHandler({
     sendMessage,
     getActiveCardNamesFn: async () => ["BBVA Platino"]
   });
 
+  const saveExpenseFn = async ({ chatId, draft }) => {
+    const result = await saveExpense({
+      chatId,
+      draft,
+      sendMessage,
+      insertExpense: async () => "exp-2",
+      updateExpenseEnrichmentFn: async () => {},
+      enrichExpenseLLMFn: async ({ baseDraft }) => ({
+        llm_provider: "local",
+        category: baseDraft.category,
+        merchant: baseDraft.merchant,
+        description: baseDraft.description
+      }),
+      llmProviderEnv: "local"
+    });
+    saved = draft;
+    return result;
+  };
+
   const { answerCallback } = createAnswerSpy();
   const callbackHandler = createCallbackHandler({
     sendMessage,
     answerCallback,
-    saveExpenseFn: async ({ draft }) => {
-      saved = draft;
-      return { ok: true, expenseId: "exp-2" };
-    },
+    saveExpenseFn,
     getActiveCardNamesFn: async () => ["BBVA Platino"]
   });
 
@@ -264,6 +313,7 @@ test("msi flow months payment confirm", async () => {
   assert.equal(saved.is_msi, true);
   assert.equal(saved.msi_months, 6);
   assert.equal(saved.payment_method, "BBVA Platino");
+  assert.ok(messages.some((msg) => msg.text.includes("ID: <code>exp-2</code>")));
 });
 
 test("text while awaiting payment method", async () => {

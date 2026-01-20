@@ -20,7 +20,8 @@ import {
   setDraft,
   clearDraft,
   clearAll,
-  setPendingDelete
+  setPendingDelete,
+  setLastExpenseId
 } from "../state.js";
 import {
   getExpenseById,
@@ -177,6 +178,7 @@ export function createMessageHandler({
 
       const result = await saveExpenseFn({ chatId, draft });
       if (result.ok) {
+        setLastExpenseId(chatId, result.expenseId);
         clearDraft(chatId);
       }
       return;
