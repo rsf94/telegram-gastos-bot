@@ -215,7 +215,12 @@ export async function updateExpenseEnrichment({
 /* =======================
  * MSI: billing_month ("Sheet month B") para una compra
  * ======================= */
-export async function getBillingMonthForPurchase({ chatId, cardName, purchaseDateISO }) {
+export async function getBillingMonthForPurchase({
+  chatId,
+  cardName,
+  purchaseDateISO,
+  bqClient = bq
+}) {
   const query = `
   WITH r AS (
     SELECT
@@ -230,17 +235,23 @@ export async function getBillingMonthForPurchase({ chatId, cardName, purchaseDat
   base AS (
     SELECT
       DATE_TRUNC(DATE(@purchase_date), MONTH) AS purchase_month,
-      (SELECT cut_day FROM r) AS cut_day,
-      (SELECT billing_shift_months FROM r) AS shift
+      EXTRACT(DAY FROM DATE(@purchase_date)) AS purchase_day,
+      r.cut_day AS cut_day,
+      r.billing_shift_months AS shift
+    FROM r
   ),
-  shifted AS (
+  base_month AS (
     SELECT
-      DATE_ADD(purchase_month, INTERVAL shift MONTH) AS monthB,
-      cut_day
+      CASE
+        WHEN purchase_day > cut_day
+          THEN DATE_ADD(purchase_month, INTERVAL 1 MONTH)
+        ELSE purchase_month
+      END AS base_month,
+      shift
     FROM base
   )
-  SELECT monthB AS billing_month
-  FROM shifted
+  SELECT DATE_ADD(base_month, INTERVAL shift MONTH) AS billing_month
+  FROM base_month
   `;
 
   const options = {
@@ -253,7 +264,7 @@ export async function getBillingMonthForPurchase({ chatId, cardName, purchaseDat
     parameterMode: "NAMED"
   };
 
-  const [job] = await bq.createQueryJob(options);
+  const [job] = await bqClient.createQueryJob(options);
   const [rows] = await job.getQueryResults();
   const bm = rows?.[0]?.billing_month;
   if (!bm) throw new Error(`No billing_month found for ${cardName} ${purchaseDateISO}`);
