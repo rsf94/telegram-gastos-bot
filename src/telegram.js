@@ -43,6 +43,28 @@ export async function answerCallbackQuery(callbackQueryId) {
   });
 }
 
+export async function tgEditMessage(chatId, messageId, text, extra = {}) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText`;
+  const payload = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    ...extra
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Telegram editMessageText failed ${res.status}: ${body}`);
+  }
+}
+
 /* =======================
  * Keyboards
  * ======================= */

@@ -3,7 +3,8 @@ import {
   tgSend,
   deleteConfirmKeyboard,
   paymentMethodKeyboard,
-  escapeHtml
+  escapeHtml,
+  mainKeyboard
 } from "../telegram.js";
 import {
   localParseExpense,
@@ -13,7 +14,8 @@ import {
   preview,
   guessCategory,
   guessMerchant,
-  cleanTextForDescription
+  cleanTextForDescription,
+  paymentMethodPreview
 } from "../parsing.js";
 import {
   getDraft,
@@ -26,16 +28,13 @@ import {
 import {
   getExpenseById,
   countInstallmentsForExpense,
-  getActiveCardNames
+  getActiveCardNames,
+  getBillingMonthForPurchase
 } from "../storage/bigquery.js";
 import { saveExpense } from "../usecases/save_expense.js";
 
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
-}
-
-function monthStartISO(yyyyMmDd) {
-  return `${String(yyyyMmDd).slice(0, 7)}-01`;
 }
 
 function looksLikeMsiText(text) {
@@ -116,10 +115,12 @@ export function createMessageHandler({
   sendMessage = tgSend,
   deleteConfirmKeyboardFn = deleteConfirmKeyboard,
   paymentMethodKeyboardFn = paymentMethodKeyboard,
+  mainKeyboardFn = mainKeyboard,
   saveExpenseFn = saveExpense,
   getExpenseByIdFn = getExpenseById,
   countInstallmentsForExpenseFn = countInstallmentsForExpense,
-  getActiveCardNamesFn = getActiveCardNames
+  getActiveCardNamesFn = getActiveCardNames,
+  getBillingMonthForPurchaseFn = getBillingMonthForPurchase
 } = {}) {
   return async function handleMessage(msg) {
     if (!msg?.chat?.id) return;
@@ -169,6 +170,13 @@ export function createMessageHandler({
       const draft = getDraft(chatId);
       if (!draft) {
         await sendMessage(chatId, "No tengo borrador. Mándame un gasto primero.");
+        return;
+      }
+      if (draft.is_msi && (!draft.msi_months || Number(draft.msi_months) <= 1)) {
+        await sendMessage(
+          chatId,
+          "Faltan los meses MSI. Responde solo el número (ej: <code>6</code>)."
+        );
         return;
       }
       if (!draft.payment_method) {
@@ -242,21 +250,24 @@ export function createMessageHandler({
         existing.msi_total_amount = Number(existing.amount_mxn);
       }
 
-      // start_month default al mes de compra
-      existing.msi_start_month = existing.msi_start_month || monthStartISO(existing.purchase_date);
+      if (!existing.payment_method) {
+        await sendMessage(chatId, "Elige un método con botones o escribe cancelar.");
+        return;
+      }
+
+      existing.msi_start_month = await getBillingMonthForPurchaseFn({
+        chatId,
+        cardName: existing.payment_method,
+        purchaseDateISO: existing.purchase_date
+      });
 
       // amount_mxn = mensual (cashflow)
       existing.amount_mxn = round2(Number(existing.msi_total_amount) / n);
 
-      existing.__state = "awaiting_payment_method";
-
+      existing.__state = "ready_to_confirm";
       setDraft(chatId, existing);
-
-      const activeCards = await getActiveCardNamesFn(chatId);
-      const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
-
       await sendMessage(chatId, preview(existing), {
-        reply_markup: paymentMethodKeyboardFn(paymentMethods)
+        reply_markup: mainKeyboardFn()
       });
       return;
     }
@@ -322,17 +333,18 @@ export function createMessageHandler({
       // interpretamos el monto del texto como TOTAL de la compra
       draft.is_msi = true;
       draft.msi_total_amount = Number(draft.msi_total_amount || draft.amount_mxn);
-      draft.msi_start_month = monthStartISO(draft.purchase_date);
 
       if (!Number.isFinite(draft.msi_months) || draft.msi_months <= 1) {
         draft.msi_months = null;
-        draft.__state = "awaiting_msi_months";
+        draft.__state = "awaiting_payment_method";
 
         setDraft(chatId, draft);
-        await sendMessage(
-          chatId,
-          "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (responde solo el número, ej: <code>6</code>)"
-        );
+        const activeCards = await getActiveCardNamesFn(chatId);
+        const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
+
+        await sendMessage(chatId, paymentMethodPreview(draft), {
+          reply_markup: paymentMethodKeyboardFn(paymentMethods)
+        });
         return;
       }
 
@@ -343,7 +355,7 @@ export function createMessageHandler({
       const activeCards = await getActiveCardNamesFn(chatId);
       const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
 
-      await sendMessage(chatId, preview(draft), {
+      await sendMessage(chatId, paymentMethodPreview(draft), {
         reply_markup: paymentMethodKeyboardFn(paymentMethods)
       });
       return;
@@ -361,7 +373,7 @@ export function createMessageHandler({
     setDraft(chatId, draft);
     const activeCards = await getActiveCardNamesFn(chatId);
     const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
-    await sendMessage(chatId, preview(draft), {
+    await sendMessage(chatId, paymentMethodPreview(draft), {
       reply_markup: paymentMethodKeyboardFn(paymentMethods)
     });
   };

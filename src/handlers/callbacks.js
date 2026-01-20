@@ -1,7 +1,14 @@
-import { mainKeyboard, editMenuKeyboard, tgSend, answerCallbackQuery } from "../telegram.js";
+import {
+  mainKeyboard,
+  editMenuKeyboard,
+  tgSend,
+  answerCallbackQuery,
+  tgEditMessage
+} from "../telegram.js";
 import { preview, validateDraft } from "../parsing.js";
 import {
   getDraft,
+  setDraft,
   clearDraft,
   getPendingDelete,
   clearPendingDelete,
@@ -9,17 +16,19 @@ import {
 } from "../state.js";
 import { saveExpense } from "../usecases/save_expense.js";
 import { deleteExpense } from "../usecases/delete_expense.js";
-import { getActiveCardNames } from "../storage/bigquery.js";
+import { getActiveCardNames, getBillingMonthForPurchase } from "../storage/bigquery.js";
 import { ALLOWED_PAYMENT_METHODS } from "../config.js";
 
 export function createCallbackHandler({
   sendMessage = tgSend,
+  editMessage = tgEditMessage,
   answerCallback = answerCallbackQuery,
   saveExpenseFn = saveExpense,
   deleteExpenseFn = deleteExpense,
   mainKeyboardFn = mainKeyboard,
   editMenuKeyboardFn = editMenuKeyboard,
-  getActiveCardNamesFn = getActiveCardNames
+  getActiveCardNamesFn = getActiveCardNames,
+  getBillingMonthForPurchaseFn = getBillingMonthForPurchase
 } = {}) {
   return async function handleCallback(cb) {
     if (!cb?.message?.chat?.id) return;
@@ -67,6 +76,14 @@ export function createCallbackHandler({
 
       if (!draft) {
         await sendMessage(chatId, "No tengo borrador. Mándame un gasto primero.");
+        await answerCallback(cb.id);
+        return;
+      }
+      if (draft.is_msi && (!draft.msi_months || Number(draft.msi_months) <= 1)) {
+        await sendMessage(
+          chatId,
+          "Faltan los meses MSI. Responde solo el número (ej: <code>6</code>)."
+        );
         await answerCallback(cb.id);
         return;
       }
@@ -128,6 +145,29 @@ export function createCallbackHandler({
 
       draft.payment_method = method;
       draft.__state = "ready_to_confirm";
+      const messageId = cb.message?.message_id;
+
+      if (draft.is_msi && (!draft.msi_months || Number(draft.msi_months) <= 1)) {
+        draft.__state = "awaiting_msi_months";
+        setDraft(chatId, draft);
+        const question =
+          "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (responde solo el número, ej: <code>6</code>)";
+        if (messageId) {
+          await editMessage(chatId, messageId, question);
+        } else {
+          await sendMessage(chatId, question);
+        }
+        await answerCallback(cb.id);
+        return;
+      }
+
+      if (draft.is_msi) {
+        draft.msi_start_month = await getBillingMonthForPurchaseFn({
+          chatId,
+          cardName: draft.payment_method,
+          purchaseDateISO: draft.purchase_date
+        });
+      }
 
       const err = validateDraft(draft);
       if (err) {
@@ -136,7 +176,13 @@ export function createCallbackHandler({
         return;
       }
 
-      await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
+      if (messageId) {
+        await editMessage(chatId, messageId, preview(draft), {
+          reply_markup: mainKeyboardFn()
+        });
+      } else {
+        await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
+      }
       await answerCallback(cb.id);
       return;
     }

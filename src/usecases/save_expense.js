@@ -65,7 +65,7 @@ export async function saveExpense({
     const bqInsertMs = Date.now() - bqStart;
     await sendMessage(
       chatId,
-      `✅ Guardado en BigQuery. ID: <code>${escapeHtml(expenseId)}</code>`
+      `✅ Guardado. ID: <code>${escapeHtml(expenseId)}</code>`
     );
 
     const flow = draft.is_msi ? "msi" : "normal";

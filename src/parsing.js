@@ -57,11 +57,6 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
-function monthStartISO(yyyyMmDd) {
-  // yyyyMmDd = YYYY-MM-DD -> YYYY-MM-01
-  return `${String(yyyyMmDd).slice(0, 7)}-01`;
-}
-
 function formatMoneyMXN(n) {
   const x = Number(n || 0);
   return x.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
@@ -282,7 +277,7 @@ export function localParseExpense(text) {
     is_msi,
     msi_months,
     msi_total_amount,
-    msi_start_month: is_msi ? monthStartISO(purchase_date) : null,
+    msi_start_month: null,
     amex_ambiguous,
 
     __meta: {
@@ -346,7 +341,7 @@ export function naiveParse(text) {
     is_msi,
     msi_months,
     msi_total_amount,
-    msi_start_month: is_msi ? monthStartISO(d || today) : null,
+    msi_start_month: null,
     __meta: {
       amount_tokens: m ? [m[1]] : [],
       amounts_found: m ? 1 : 0,
@@ -407,6 +402,37 @@ export function validateDraft(d, { skipPaymentMethod = false } = {}) {
 }
 
 /* =======================
+ * Payment method prompt
+ * ======================= */
+export function paymentMethodPreview(d) {
+  const lines = ["💳 <b>Elige método de pago</b>"];
+
+  const isMsi = d?.is_msi === true;
+  if (isMsi) {
+    const total = Number(d.msi_total_amount || 0);
+    const months = d.msi_months != null ? Number(d.msi_months) : null;
+
+    lines.push(`MSI: <b>sí</b>`);
+    lines.push(`Total compra: <b>${escapeHtml(formatMoneyMXN(total))}</b>`);
+    if (!months || !Number.isFinite(months) || months <= 1) {
+      lines.push(`Meses: <b>❓ (falta)</b>`);
+    } else {
+      lines.push(`Meses: <b>${escapeHtml(String(months))}</b>`);
+    }
+  } else {
+    lines.push(`MSI: <b>no</b>`);
+    lines.push(`Monto: <b>${escapeHtml(formatMoneyMXN(d.amount_mxn))}</b>`);
+  }
+
+  const paymentLabel = d.payment_method ? escapeHtml(d.payment_method) : "❓ (falta)";
+  lines.push(`Método: <b>${paymentLabel}</b>`);
+  lines.push(`Fecha: <b>${escapeHtml(d.purchase_date)}</b>`);
+
+  lines.push("", "Toca un botón:");
+  return lines.join("\n");
+}
+
+/* =======================
  * Preview (MSI-friendly)
  * ======================= */
 export function preview(d) {
@@ -432,8 +458,12 @@ export function preview(d) {
       lines.push(`Mensualidad aprox: <b>${escapeHtml(formatMoneyMXN(monthly))}</b>`);
     }
 
-    const sm = d.msi_start_month || monthStartISO(d.purchase_date);
-    lines.push(`Mes de inicio: <b>${escapeHtml(sm)}</b>`);
+    const sm = d.msi_start_month;
+    if (sm) {
+      lines.push(`Mes de inicio: <b>${escapeHtml(sm)}</b>`);
+    } else {
+      lines.push("Mes de inicio: <b>❓ (falta)</b>");
+    }
   } else {
     lines.push(`Monto: <b>${escapeHtml(formatMoneyMXN(d.amount_mxn))}</b>`);
   }
