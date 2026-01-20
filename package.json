@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "smoke": "node --test"
   },
   "dependencies": {
     "express": "^4.19.2",

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import {
   GEMINI_API_KEY,
   GEMINI_MODEL,
@@ -9,6 +10,30 @@ import {
 } from "./config.js";
 import { cleanTextForDescription, todayISOInTZ } from "./parsing.js";
 import { callDeepSeekEnrich, validateDeepSeekEnrich } from "./deepseek.js";
+
+const CACHE_TTL_MS = 10 * 60 * 1000;
+const llmCache = new Map();
+
+function buildCacheKey(text, paymentMethod) {
+  return crypto
+    .createHash("sha256")
+    .update(`${text || ""}||${paymentMethod || ""}`)
+    .digest("hex");
+}
+
+function getCachedEntry(key) {
+  const entry = llmCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    llmCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedEntry(key, value) {
+  llmCache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+}
 
 function extractJsonObject(text) {
   const match = String(text || "").match(/\{[\s\S]*\}/);
@@ -144,15 +169,23 @@ function resolveFallbackPreference() {
 }
 
 export async function enrichExpenseLLM({ text, todayISO = todayISOInTZ(), baseDraft }) {
-  const fallback = buildFallback(text, baseDraft);
+  const cacheKey = buildCacheKey(text, baseDraft?.payment_method);
+  const cached = getCachedEntry(cacheKey);
+  if (cached) return cached;
+
+  const fallback = { ...buildFallback(text, baseDraft), llm_provider: "local" };
   const provider = String(LLM_PROVIDER || "gemini").toLowerCase();
 
   if (provider !== "gemini") {
+    setCachedEntry(cacheKey, fallback);
     return fallback;
   }
 
   try {
-    return await callGeminiComplete({ text, todayISO });
+    const completion = await callGeminiComplete({ text, todayISO });
+    const result = { ...completion, llm_provider: "gemini" };
+    setCachedEntry(cacheKey, result);
+    return result;
   } catch (error) {
     const fallbackPref = resolveFallbackPreference();
     if (fallbackPref === "deepseek" && DEEPSEEK_API_KEY) {
@@ -175,17 +208,21 @@ export async function enrichExpenseLLM({ text, todayISO = todayISOInTZ(), baseDr
         console.warn(
           `LLM fallback=deepseek durationMs=${durationMs} error=${shortError(error)}`
         );
-        return validation.draft;
+        const result = { ...validation.draft, llm_provider: "deepseek" };
+        setCachedEntry(cacheKey, result);
+        return result;
       } catch (deepseekError) {
         const durationMs = Date.now() - start;
         console.warn(
           `LLM fallback=local durationMs=${durationMs} error=${shortError(deepseekError)}`
         );
+        setCachedEntry(cacheKey, fallback);
         return fallback;
       }
     }
 
     console.warn(`LLM fallback=local durationMs=0 error=${shortError(error)}`);
+    setCachedEntry(cacheKey, fallback);
     return fallback;
   }
 }
