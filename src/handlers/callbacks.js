@@ -1,5 +1,5 @@
 import { mainKeyboard, editMenuKeyboard, tgSend, answerCallbackQuery } from "../telegram.js";
-import { preview } from "../parsing.js";
+import { preview, validateDraft } from "../parsing.js";
 import {
   getDraft,
   clearDraft,
@@ -8,6 +8,8 @@ import {
 } from "../state.js";
 import { saveExpense } from "../usecases/save_expense.js";
 import { deleteExpense } from "../usecases/delete_expense.js";
+import { getActiveCardNames } from "../storage/bigquery.js";
+import { ALLOWED_PAYMENT_METHODS } from "../config.js";
 
 export function createCallbackHandler({
   sendMessage = tgSend,
@@ -15,7 +17,8 @@ export function createCallbackHandler({
   saveExpenseFn = saveExpense,
   deleteExpenseFn = deleteExpense,
   mainKeyboardFn = mainKeyboard,
-  editMenuKeyboardFn = editMenuKeyboard
+  editMenuKeyboardFn = editMenuKeyboard,
+  getActiveCardNamesFn = getActiveCardNames
 } = {}) {
   return async function handleCallback(cb) {
     if (!cb?.message?.chat?.id) return;
@@ -66,6 +69,11 @@ export function createCallbackHandler({
         await answerCallback(cb.id);
         return;
       }
+      if (!draft.payment_method) {
+        await sendMessage(chatId, "Elige un método con botones o escribe cancelar.");
+        await answerCallback(cb.id);
+        return;
+      }
 
       const result = await saveExpenseFn({ chatId, draft });
       if (result.ok) {
@@ -91,6 +99,42 @@ export function createCallbackHandler({
       } else {
         await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
       }
+      await answerCallback(cb.id);
+      return;
+    }
+
+    if (data?.startsWith("payment_method|")) {
+      const draft = getDraft(chatId);
+      if (!draft) {
+        await sendMessage(chatId, "No tengo borrador. Mándame un gasto primero.");
+        await answerCallback(cb.id);
+        return;
+      }
+
+      const method = data.split("|").slice(1).join("|").trim();
+      const activeCards = await getActiveCardNamesFn(chatId);
+      const allowed = new Set([
+        ...ALLOWED_PAYMENT_METHODS,
+        ...(activeCards?.length ? activeCards : [])
+      ]);
+
+      if (!allowed.has(method)) {
+        await sendMessage(chatId, "Método inválido. Elige uno de los botones.");
+        await answerCallback(cb.id);
+        return;
+      }
+
+      draft.payment_method = method;
+      draft.__state = "ready_to_confirm";
+
+      const err = validateDraft(draft);
+      if (err) {
+        await sendMessage(chatId, err);
+        await answerCallback(cb.id);
+        return;
+      }
+
+      await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
       await answerCallback(cb.id);
       return;
     }

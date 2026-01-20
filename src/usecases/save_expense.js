@@ -1,8 +1,10 @@
 import { LLM_PROVIDER } from "../config.js";
-import { insertExpenseAndMaybeInstallments } from "../storage/bigquery.js";
+import {
+  insertExpenseAndMaybeInstallments,
+  updateExpenseEnrichment
+} from "../storage/bigquery.js";
 import { escapeHtml, tgSend } from "../telegram.js";
-
-const PERF_TELEGRAM = process.env.PERF_TELEGRAM === "1";
+import { enrichExpenseLLM } from "../gemini.js";
 
 function formatBigQueryError(e) {
   if (!e) return "Error desconocido";
@@ -36,10 +38,7 @@ function shortError(error) {
 }
 
 function logPerf(payload, level = "log") {
-  const base = {
-    type: "perf",
-    ...payload
-  };
+  const base = { type: "perf", ...payload };
   if (level === "warn") {
     console.warn(JSON.stringify(base));
   } else {
@@ -47,65 +46,112 @@ function logPerf(payload, level = "log") {
   }
 }
 
-function formatPerfLine({ totalMs, llmMs, bqMs }) {
-  return `⏱️ ${totalMs}ms (LLM ${llmMs}ms, BQ ${bqMs}ms)`;
-}
-
 export async function saveExpense({
   chatId,
   draft,
   insertExpense = insertExpenseAndMaybeInstallments,
   sendMessage = tgSend,
-  llmProviderEnv = LLM_PROVIDER,
-  perfTelegram = PERF_TELEGRAM
+  updateExpenseEnrichmentFn = updateExpenseEnrichment,
+  enrichExpenseLLMFn = enrichExpenseLLM,
+  llmProviderEnv = LLM_PROVIDER
 }) {
   const perf = draft.__perf || {};
-  const localParseMs = Number(perf.local_parse_ms || 0);
-  const llmMs = Number(perf.llm_ms || 0);
-  const llmProvider = perf.llm_provider || String(llmProviderEnv || "local");
+  const parseMs = Number(perf.parse_ms || 0);
   const bqStart = Date.now();
+  const preferredProvider = String(llmProviderEnv || "local");
 
   try {
     const expenseId = await insertExpense(draft, chatId);
-    const bqMs = Date.now() - bqStart;
-    const totalMs = localParseMs + llmMs + bqMs;
+    const bqInsertMs = Date.now() - bqStart;
+    await sendMessage(chatId, "Guardado ✅");
 
-    logPerf({
-      flow: "expense_create",
-      local_parse_ms: localParseMs,
-      llm_ms: llmMs,
-      bq_ms: bqMs,
-      total_ms: totalMs,
-      llm_provider: llmProvider,
-      ok: true,
-      err_short: null
-    });
+    const flow = draft.is_msi ? "msi" : "normal";
 
-    const perfLine = perfTelegram ? `\n${formatPerfLine({ totalMs, llmMs, bqMs })}` : "";
-    await sendMessage(
-      chatId,
-      `✅ <b>Guardado</b>\nID: <code>${escapeHtml(expenseId)}</code>${perfLine}`
-    );
+    void (async () => {
+      const llmStart = Date.now();
+      let llmMs = 0;
+      let bqUpdateMs = 0;
+      let llmProvider = preferredProvider;
+      let usedFallback = false;
+
+      try {
+        const ai = await enrichExpenseLLMFn({ text: draft.raw_text || "", baseDraft: draft });
+        llmMs = Date.now() - llmStart;
+        llmProvider = ai.llm_provider || llmProvider;
+        usedFallback = llmProvider !== preferredProvider;
+
+        const enrichment =
+          llmProvider === "local"
+            ? {
+                category: draft.category,
+                merchant: draft.merchant,
+                description: draft.description
+              }
+            : {
+                category: ai.category,
+                merchant: ai.merchant,
+                description: ai.description
+              };
+
+        const updateStart = Date.now();
+        await updateExpenseEnrichmentFn({
+          chatId,
+          expenseId,
+          category: enrichment.category,
+          merchant: enrichment.merchant,
+          description: enrichment.description
+        });
+        bqUpdateMs = Date.now() - updateStart;
+
+        const totalMs = parseMs + bqInsertMs + llmMs + bqUpdateMs;
+        logPerf({
+          flow,
+          parse_ms: parseMs,
+          bq_insert_ms: bqInsertMs,
+          llm_ms: llmMs,
+          bq_update_ms: bqUpdateMs,
+          total_ms: totalMs,
+          llm_provider: llmProvider,
+          used_fallback: usedFallback
+        });
+      } catch (error) {
+        llmMs = Date.now() - llmStart;
+        const totalMs = parseMs + bqInsertMs + llmMs + bqUpdateMs;
+        logPerf(
+          {
+            flow,
+            parse_ms: parseMs,
+            bq_insert_ms: bqInsertMs,
+            llm_ms: llmMs,
+            bq_update_ms: bqUpdateMs,
+            total_ms: totalMs,
+            llm_provider: llmProvider,
+            used_fallback,
+            err_short: shortError(error)
+          },
+          "warn"
+        );
+      }
+    })();
 
     return { ok: true, expenseId };
   } catch (e) {
-    const bqMs = Date.now() - bqStart;
-    const totalMs = localParseMs + llmMs + bqMs;
-
+    const bqInsertMs = Date.now() - bqStart;
+    const flow = draft?.is_msi ? "msi" : "normal";
     logPerf(
       {
-        flow: "expense_create",
-        local_parse_ms: localParseMs,
-        llm_ms: llmMs,
-        bq_ms: bqMs,
-        total_ms: totalMs,
-        llm_provider: llmProvider,
-        ok: false,
+        flow,
+        parse_ms: parseMs,
+        bq_insert_ms: bqInsertMs,
+        llm_ms: 0,
+        bq_update_ms: 0,
+        total_ms: parseMs + bqInsertMs,
+        llm_provider: preferredProvider,
+        used_fallback: false,
         err_short: shortError(e)
       },
       "warn"
     );
-
     logBigQueryError(e);
     const pretty = formatBigQueryError(e);
     await sendMessage(chatId, `❌ <b>No se pudo guardar</b>\n${escapeHtml(pretty)}`);

@@ -122,6 +122,123 @@ export function cleanTextForDescription(text, amountToken, paymentMethod) {
   return cleanDescription(text, tokensToRemove);
 }
 
+function normalizeForCategory(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const CATEGORY_RULES = [
+  { pattern: /\b(uber|didi|parco|estacionamiento)\b/, category: "Transport" },
+  {
+    pattern: /\b(la comer|lacom(er)?|city market|chedraui|costco|walmart)\b/,
+    category: "Groceries"
+  },
+  {
+    pattern: /\b(amazon|mercado libre|temu|microsoft|apple)\b/,
+    category: "E-commerce"
+  },
+  { pattern: /\b(spotify|netflix|chatgpt|subscription)\b/, category: "Subscriptions" },
+  { pattern: /\b(telmex|telcel)\b/, category: "Telecom" },
+  { pattern: /\bplanet fitness\b/, category: "Gym" },
+  { pattern: /\bcfe\b/, category: "Utilities" },
+  {
+    pattern: /\b(interceramic|aliada|honesta|zolver)\b/,
+    category: "Home maintenance"
+  },
+  {
+    pattern: /\b(pemex|gasolinera|corpogas|max gass|gasolina)\b/,
+    category: "Gas"
+  },
+  {
+    pattern: /\b(farmacia san pablo|medify|nutriologa)\b/,
+    category: "Medical"
+  },
+  {
+    pattern:
+      /\b(toks|termini|crepes and waffles|pizza felix|peltre|pampas|asturiano|restaurante)\b/,
+    category: "Restaurant"
+  },
+  {
+    pattern: /\b(viva aerobus|aifa|travelers rewards|nyc)\b/,
+    category: "Travel"
+  },
+  { pattern: /\b(palacio de hierro|liverpool|promoda)\b/, category: "Clothing" }
+];
+
+const MERCHANT_RULES = [
+  { pattern: /\buber\b/, merchant: "Uber" },
+  { pattern: /\bdidi\b/, merchant: "Didi" },
+  { pattern: /\bparco\b/, merchant: "Parco" },
+  { pattern: /\bestacionamiento\b/, merchant: "Estacionamiento" },
+  { pattern: /\bla comer|lacom(er)?\b/, merchant: "La Comer" },
+  { pattern: /\bcity market\b/, merchant: "City Market" },
+  { pattern: /\bchedraui\b/, merchant: "Chedraui" },
+  { pattern: /\bcostco\b/, merchant: "Costco" },
+  { pattern: /\bwalmart\b/, merchant: "Walmart" },
+  { pattern: /\bamazon\b/, merchant: "Amazon" },
+  { pattern: /\bmercado libre\b/, merchant: "Mercado Libre" },
+  { pattern: /\btemu\b/, merchant: "Temu" },
+  { pattern: /\bmicrosoft\b/, merchant: "Microsoft" },
+  { pattern: /\bapple\b/, merchant: "Apple" },
+  { pattern: /\bspotify\b/, merchant: "Spotify" },
+  { pattern: /\bnetflix\b/, merchant: "Netflix" },
+  { pattern: /\bchatgpt\b/, merchant: "ChatGPT" },
+  { pattern: /\btelmex\b/, merchant: "Telmex" },
+  { pattern: /\btelcel\b/, merchant: "Telcel" },
+  { pattern: /\bplanet fitness\b/, merchant: "Planet Fitness" },
+  { pattern: /\bcfe\b/, merchant: "CFE" },
+  { pattern: /\binterceramic\b/, merchant: "Interceramic" },
+  { pattern: /\baliada\b/, merchant: "Aliada" },
+  { pattern: /\bhonesta\b/, merchant: "Honesta" },
+  { pattern: /\bzolver\b/, merchant: "Zolver" },
+  { pattern: /\bpemex\b/, merchant: "Pemex" },
+  { pattern: /\bgasolinera\b/, merchant: "Gasolinera" },
+  { pattern: /\bcorpogas\b/, merchant: "Corpogas" },
+  { pattern: /\bmax gass\b/, merchant: "Max Gass" },
+  { pattern: /\bfarmacia san pablo\b/, merchant: "Farmacia San Pablo" },
+  { pattern: /\bmedify\b/, merchant: "Medify" },
+  { pattern: /\bnutriologa\b/, merchant: "Nutrióloga" },
+  { pattern: /\btoks\b/, merchant: "Toks" },
+  { pattern: /\btermini\b/, merchant: "Termini" },
+  { pattern: /\bcrepes and waffles\b/, merchant: "Crepes & Waffles" },
+  { pattern: /\bpizza felix\b/, merchant: "Pizza Felix" },
+  { pattern: /\bpeltre\b/, merchant: "Peltre" },
+  { pattern: /\bpampas\b/, merchant: "Pampas" },
+  { pattern: /\basturiano\b/, merchant: "Asturiano" },
+  { pattern: /\bviva aerobus\b/, merchant: "Viva Aerobus" },
+  { pattern: /\baifa\b/, merchant: "AIFA" },
+  { pattern: /\btravelers rewards\b/, merchant: "Travelers Rewards" },
+  { pattern: /\bnyc\b/, merchant: "NYC" },
+  { pattern: /\bpalacio de hierro\b/, merchant: "Palacio de Hierro" },
+  { pattern: /\bliverpool\b/, merchant: "Liverpool" },
+  { pattern: /\bpromoda\b/, merchant: "Promoda" }
+];
+
+export function guessCategory(text) {
+  const normalized = normalizeForCategory(text);
+  for (const rule of CATEGORY_RULES) {
+    if (rule.pattern.test(normalized)) {
+      return ALLOWED_CATEGORIES.includes(rule.category) ? rule.category : "Other";
+    }
+  }
+  return "Other";
+}
+
+export function guessMerchant(text) {
+  const normalized = normalizeForCategory(text);
+  for (const rule of MERCHANT_RULES) {
+    if (rule.pattern.test(normalized)) {
+      return rule.merchant;
+    }
+  }
+  return "";
+}
+
 export function localParseExpense(text) {
   const raw = String(text || "");
   const lower = raw.toLowerCase();
@@ -241,7 +358,7 @@ export function naiveParse(text) {
 /* =======================
  * Validate draft (incluye MSI)
  * ======================= */
-export function validateDraft(d) {
+export function validateDraft(d, { skipPaymentMethod = false } = {}) {
   // Si es MSI y faltan meses, NO lo marques como error duro:
   // tu index.js ya tiene el flujo para pedir "¿a cuántos meses?"
   if (d?.is_msi === true) {
@@ -262,20 +379,22 @@ export function validateDraft(d) {
     }
   }
 
-  if (!d.payment_method) {
-    if (d.amex_ambiguous || (d.description || "").toLowerCase().includes("amex")) {
-      return "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico.";
+  if (!skipPaymentMethod) {
+    if (!d.payment_method) {
+      if (d.amex_ambiguous || (d.description || "").toLowerCase().includes("amex")) {
+        return "❌ 'Amex' es ambiguo. Usa: American Express o Amex Aeromexico.";
+      }
+      return (
+        "❌ Método de pago inválido. Usa uno de:\n- " +
+        ALLOWED_PAYMENT_METHODS.join("\n- ")
+      );
     }
-    return (
-      "❌ Método de pago inválido. Usa uno de:\n- " +
-      ALLOWED_PAYMENT_METHODS.join("\n- ")
-    );
-  }
-  if (!ALLOWED_PAYMENT_METHODS.includes(d.payment_method)) {
-    return (
-      "❌ Método de pago inválido. Usa uno de:\n- " +
-      ALLOWED_PAYMENT_METHODS.join("\n- ")
-    );
+    if (!ALLOWED_PAYMENT_METHODS.includes(d.payment_method)) {
+      return (
+        "❌ Método de pago inválido. Usa uno de:\n- " +
+        ALLOWED_PAYMENT_METHODS.join("\n- ")
+      );
+    }
   }
 
   if (!ALLOWED_CATEGORIES.includes(d.category)) d.category = "Other";
@@ -319,7 +438,8 @@ export function preview(d) {
     lines.push(`Monto: <b>${escapeHtml(formatMoneyMXN(d.amount_mxn))}</b>`);
   }
 
-  lines.push(`Método: <b>${escapeHtml(d.payment_method)}</b>`);
+  const paymentLabel = d.payment_method ? escapeHtml(d.payment_method) : "❓ (falta)";
+  lines.push(`Método: <b>${paymentLabel}</b>`);
   lines.push(`Fecha: <b>${escapeHtml(d.purchase_date)}</b>`);
   lines.push(`Categoría: <b>${escapeHtml(d.category)}</b>`);
   lines.push(`Descripción: ${escapeHtml(d.description)}`);
