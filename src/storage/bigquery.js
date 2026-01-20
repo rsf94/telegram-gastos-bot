@@ -43,6 +43,18 @@ function normalizeDateISO(value) {
   return String(value);
 }
 
+function dateAtNoonUTC(iso) {
+  return new Date(`${iso}T12:00:00Z`);
+}
+
+function lastDayOfMonth(year, month1to12) {
+  return new Date(Date.UTC(year, month1to12, 0)).getUTCDate();
+}
+
+function clampDay(year, month1to12, day) {
+  return Math.min(day, lastDayOfMonth(year, month1to12));
+}
+
 /* =======================
  * Insertar gasto SIMPLE (legacy / no MSI schedule)
  * ======================= */
@@ -337,7 +349,7 @@ export async function deleteEnrichmentRetryTask({ expenseId, chatId }) {
 }
 
 /* =======================
- * MSI: billing_month ("Sheet month B") para una compra
+ * MSI: cashflow_month ("mes en que se paga") para una compra
  * ======================= */
 export async function getBillingMonthForPurchase({
   chatId,
@@ -355,24 +367,44 @@ export async function getBillingMonthForPurchase({
     throw new Error(`No billing_month found for ${cardName} ${purchaseDateISO}`);
   }
 
-  const purchaseDate = new Date(`${purchaseDateISO}T12:00:00Z`);
+  const purchaseDate = dateAtNoonUTC(purchaseDateISO);
   const purchaseDay = purchaseDate.getUTCDate();
   const cutDay = Number(rule.cut_day);
-  const shift = Number(rule.billing_shift_months || 0);
+  const payOffsetDays = Number(rule.pay_offset_days || 0);
+  const rollWeekendToMonday = Boolean(rule.roll_weekend_to_monday);
 
-  const baseMonth = new Date(
-    Date.UTC(purchaseDate.getUTCFullYear(), purchaseDate.getUTCMonth(), 1, 12, 0, 0)
-  );
+  let cutYear = purchaseDate.getUTCFullYear();
+  let cutMonth = purchaseDate.getUTCMonth() + 1;
 
   if (purchaseDay > cutDay) {
-    baseMonth.setUTCMonth(baseMonth.getUTCMonth() + 1);
+    cutMonth += 1;
+    if (cutMonth === 13) {
+      cutMonth = 1;
+      cutYear += 1;
+    }
   }
 
-  const billingMonth = new Date(
-    Date.UTC(baseMonth.getUTCFullYear(), baseMonth.getUTCMonth() + shift, 1, 12, 0, 0)
+  const cutDate = new Date(
+    Date.UTC(cutYear, cutMonth - 1, clampDay(cutYear, cutMonth, cutDay), 12, 0, 0)
   );
 
-  return normalizeDateISO(billingMonth); // 'YYYY-MM-01'
+  const payDate = new Date(cutDate);
+  payDate.setUTCDate(payDate.getUTCDate() + payOffsetDays);
+
+  if (rollWeekendToMonday) {
+    const weekday = payDate.getUTCDay();
+    if (weekday === 6) {
+      payDate.setUTCDate(payDate.getUTCDate() + 2);
+    } else if (weekday === 0) {
+      payDate.setUTCDate(payDate.getUTCDate() + 1);
+    }
+  }
+
+  const cashflowMonth = new Date(
+    Date.UTC(payDate.getUTCFullYear(), payDate.getUTCMonth(), 1, 12, 0, 0)
+  );
+
+  return normalizeDateISO(cashflowMonth); // 'YYYY-MM-01'
 }
 
 /* =======================
