@@ -30,6 +30,25 @@ Luego confirma con botón ✅ o escribiendo `confirmar`.
 
 ---
 
+## 📊 Modo análisis
+
+Escribe `/analisis` para abrir un menú con:
+
+1. **Gasto del mes (total y por categoría)**  
+2. **Qué pago en: Este mes / Próximo mes / Elegir mes**  
+3. **Total pendiente MSI**  
+4. **Categorías donde más subí (vs mes anterior)**
+
+**¿Qué significa “pagar en mes X”?**  
+Se consideran los estados de cuenta cuyo **pay_date** cae dentro del mes X. Para cada tarjeta, el bot calcula:
+
+- **cut_date** del ciclo correspondiente
+- **pay_date** = cut_date + `pay_offset_days` (rodando a lunes si aplica)
+- **No MSI**: compras entre `prev_cut_date + 1` y `cut_date`
+- **MSI**: suma de `installments` con `billing_month` = mes del `cut_date`
+
+---
+
 ## 🧰 Tech Stack
 
 - Node.js + Express

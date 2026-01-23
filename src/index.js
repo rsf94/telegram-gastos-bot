@@ -4,6 +4,7 @@ import { warnMissingEnv } from "./config.js";
 import { runDailyCardReminders } from "./reminders.js";
 import { createCallbackHandler } from "./handlers/callbacks.js";
 import { createMessageHandler } from "./handlers/messages.js";
+import { createAnalysisHandler } from "./handlers/analysis.js";
 import {
   getDueEnrichmentRetries,
   getExpenseById,
@@ -17,8 +18,13 @@ warnMissingEnv();
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-const handleCallback = createCallbackHandler();
-const handleMessage = createMessageHandler();
+const analysisHandler = createAnalysisHandler();
+const handleCallback = createCallbackHandler({
+  handleAnalysisCallback: analysisHandler.handleAnalysisCallback
+});
+const handleMessage = createMessageHandler({
+  handleAnalysisCommand: analysisHandler.handleAnalysisCommand
+});
 
 /* =======================
  * Routes
