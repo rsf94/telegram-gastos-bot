@@ -198,3 +198,15 @@ Si quieres correr el smoke test:
 ```bash
 npm run smoke
 ```
+
+---
+
+## 🌐 Dashboard web (read-only)
+
+MVP con Next.js + Tailwind en `web/`.
+
+```bash
+npm run web:dev
+```
+
+Más detalles y variables de entorno en `web/README.md`.
