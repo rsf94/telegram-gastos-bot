@@ -33,6 +33,7 @@ import {
   getBillingMonthForPurchase
 } from "../storage/bigquery.js";
 import { saveExpense } from "../usecases/save_expense.js";
+import { helpText, welcomeText } from "../ui/copy.js";
 
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -130,35 +131,20 @@ export function createMessageHandler({
     const chatId = String(msg.chat.id);
     const text = (msg.text || "").trim();
 
+    const low = text.toLowerCase();
+
     if (!text) {
-      await sendMessage(
-        chatId,
-        '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)'
-      );
+      await sendMessage(chatId, welcomeText());
       return;
     }
 
-    const low = text.toLowerCase();
-
     if (low === "ayuda" || low === "/help") {
-      await sendMessage(
-        chatId,
-        [
-          "🧾 <b>Envíame un gasto</b>. Ej:",
-          "<code>230 Uber American Express ayer</code>",
-          "",
-          "🧾 <b>MSI</b>. Ej:",
-          "<code>gasolina 1200 BBVA Platino a MSI</code>",
-          "y luego respondes sólo: <code>6</code>",
-          "",
-          "Luego confirma con botón ✅ o escribe <b>confirmar</b>.",
-          "",
-          "<b>Métodos válidos:</b>",
-          ALLOWED_PAYMENT_METHODS.map((x) => `- ${escapeHtml(x)}`).join("\n"),
-          "",
-          "Nota: <b>'Amex'</b> a secas es ambiguo."
-        ].join("\n")
-      );
+      await sendMessage(chatId, helpText());
+      return;
+    }
+
+    if (["hola", "hi", "buenas", "hey", "menu", "/start"].includes(low)) {
+      await sendMessage(chatId, welcomeText());
       return;
     }
 
@@ -309,10 +295,7 @@ export function createMessageHandler({
     const wantsMsi = draft.is_msi || looksLikeMsiText(text);
 
     if (!/\d/.test(text)) {
-      await sendMessage(
-        chatId,
-        '✅ conectado. Mándame un gasto como: <b>230</b> Uber American Express ayer\n(Escribe <b>ayuda</b> para ejemplos)'
-      );
+      await sendMessage(chatId, welcomeText());
       return;
     }
 
