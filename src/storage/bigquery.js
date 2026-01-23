@@ -186,6 +186,276 @@ export async function getActiveCardNames(chatId) {
   return getActiveCardNamesCached(chatId);
 }
 
+/* =======================
+ * Analysis helpers
+ * ======================= */
+export async function getAnalysisCategoryTotals({ chatId, monthISO }) {
+  const query = `
+    WITH params AS (
+      SELECT
+        DATE_TRUNC(DATE(@month), MONTH) AS month_start,
+        DATE_ADD(DATE_TRUNC(DATE(@month), MONTH), INTERVAL 1 MONTH) AS next_month
+    ),
+    no_msi AS (
+      SELECT
+        COALESCE(category, 'Other') AS category,
+        SUM(amount_mxn) AS total
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`, params
+      WHERE chat_id = @chat_id
+        AND purchase_date >= params.month_start
+        AND purchase_date < params.next_month
+        AND (is_msi IS NULL OR is_msi = FALSE)
+      GROUP BY category
+    ),
+    msi AS (
+      SELECT
+        COALESCE(e.category, 'Other') AS category,
+        SUM(i.amount_mxn) AS total
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\` i
+      JOIN \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` e
+        ON e.id = i.expense_id AND e.chat_id = i.chat_id
+      CROSS JOIN params
+      WHERE i.chat_id = @chat_id
+        AND i.billing_month = params.month_start
+        AND i.status != 'PAID'
+      GROUP BY category
+    ),
+    combined AS (
+      SELECT category, total FROM no_msi
+      UNION ALL
+      SELECT category, total FROM msi
+    )
+    SELECT category, SUM(total) AS total
+    FROM combined
+    GROUP BY category
+    ORDER BY total DESC
+    LIMIT 50
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      month: monthISO
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
+export async function getAnalysisNoMsiTotalsByCardRanges({ chatId, ranges }) {
+  if (!ranges?.length) return [];
+
+  const query = `
+    WITH cards AS (
+      SELECT * FROM UNNEST(@cards) AS card
+    )
+    SELECT
+      card.card_name AS card_name,
+      COALESCE(SUM(e.amount_mxn), 0) AS total
+    FROM cards card
+    LEFT JOIN \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` e
+      ON e.chat_id = @chat_id
+      AND e.payment_method = card.card_name
+      AND e.purchase_date BETWEEN DATE(card.start_date) AND DATE(card.end_date)
+      AND (e.is_msi IS NULL OR e.is_msi = FALSE)
+    GROUP BY card.card_name
+    ORDER BY card.card_name
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      cards: ranges.map((r) => ({
+        card_name: String(r.card_name),
+        start_date: String(r.start_date),
+        end_date: String(r.end_date)
+      }))
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
+export async function getAnalysisMsiTotalsByCard({ chatId, cardNames, monthISO }) {
+  if (!cardNames?.length) return [];
+
+  const query = `
+    SELECT
+      card_name,
+      COALESCE(SUM(amount_mxn), 0) AS total
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+    WHERE chat_id = @chat_id
+      AND billing_month = DATE_TRUNC(DATE(@month), MONTH)
+      AND status != 'PAID'
+      AND card_name IN UNNEST(@card_names)
+    GROUP BY card_name
+    ORDER BY card_name
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      month: monthISO,
+      card_names: cardNames.map((name) => String(name))
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
+export async function getAnalysisPendingMsiTotal({ chatId }) {
+  const query = `
+    SELECT COALESCE(SUM(amount_mxn), 0) AS total
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+    WHERE chat_id = @chat_id
+      AND status != 'PAID'
+  `;
+
+  const options = {
+    query,
+    params: { chat_id: String(chatId) },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return Number(rows?.[0]?.total || 0);
+}
+
+export async function getAnalysisPendingMsiByCard({ chatId, limit = 6 }) {
+  const query = `
+    SELECT
+      card_name,
+      SUM(amount_mxn) AS total
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+    WHERE chat_id = @chat_id
+      AND status != 'PAID'
+    GROUP BY card_name
+    ORDER BY total DESC
+    LIMIT @limit
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      limit: Number(limit)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
+export async function getAnalysisPendingMsiByMonth({ chatId, startMonthISO, limit = 6 }) {
+  const query = `
+    SELECT
+      billing_month,
+      SUM(amount_mxn) AS total
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
+    WHERE chat_id = @chat_id
+      AND status != 'PAID'
+      AND billing_month >= DATE(@start_month)
+    GROUP BY billing_month
+    ORDER BY billing_month
+    LIMIT @limit
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      start_month: startMonthISO,
+      limit: Number(limit)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
+export async function getAnalysisCategoryDelta({ chatId, monthISO }) {
+  const query = `
+    WITH params AS (
+      SELECT
+        DATE_TRUNC(DATE(@month), MONTH) AS current_month,
+        DATE_SUB(DATE_TRUNC(DATE(@month), MONTH), INTERVAL 1 MONTH) AS prev_month
+    ),
+    no_msi AS (
+      SELECT
+        DATE_TRUNC(purchase_date, MONTH) AS month,
+        COALESCE(category, 'Other') AS category,
+        SUM(amount_mxn) AS total
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`, params
+      WHERE chat_id = @chat_id
+        AND purchase_date >= params.prev_month
+        AND purchase_date < DATE_ADD(params.current_month, INTERVAL 1 MONTH)
+        AND (is_msi IS NULL OR is_msi = FALSE)
+      GROUP BY month, category
+    ),
+    msi AS (
+      SELECT
+        i.billing_month AS month,
+        COALESCE(e.category, 'Other') AS category,
+        SUM(i.amount_mxn) AS total
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\` i
+      JOIN \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\` e
+        ON e.id = i.expense_id AND e.chat_id = i.chat_id
+      CROSS JOIN params
+      WHERE i.chat_id = @chat_id
+        AND i.status != 'PAID'
+        AND i.billing_month IN (params.prev_month, params.current_month)
+      GROUP BY month, category
+    ),
+    combined AS (
+      SELECT month, category, total FROM no_msi
+      UNION ALL
+      SELECT month, category, total FROM msi
+    ),
+    agg AS (
+      SELECT month, category, SUM(total) AS total
+      FROM combined
+      GROUP BY month, category
+    )
+    SELECT
+      category,
+      SUM(IF(month = params.current_month, total, 0)) AS current_total,
+      SUM(IF(month = params.prev_month, total, 0)) AS prev_total
+    FROM agg
+    CROSS JOIN params
+    GROUP BY category, params.current_month, params.prev_month
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      month: monthISO
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
 export async function updateExpenseEnrichment({
   chatId,
   expenseId,

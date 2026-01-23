@@ -22,6 +22,7 @@ import {
   setDraft,
   clearDraft,
   clearAll,
+  getPendingDelete,
   setPendingDelete,
   setLastExpenseId
 } from "../state.js";
@@ -120,7 +121,8 @@ export function createMessageHandler({
   getExpenseByIdFn = getExpenseById,
   countInstallmentsForExpenseFn = countInstallmentsForExpense,
   getActiveCardNamesFn = getActiveCardNames,
-  getBillingMonthForPurchaseFn = getBillingMonthForPurchase
+  getBillingMonthForPurchaseFn = getBillingMonthForPurchase,
+  handleAnalysisCommand
 } = {}) {
   return async function handleMessage(msg) {
     if (!msg?.chat?.id) return;
@@ -164,6 +166,23 @@ export function createMessageHandler({
       clearAll(chatId);
       await sendMessage(chatId, "🧹 <b>Cancelado</b>.");
       return;
+    }
+
+    if (low === "/analisis") {
+      const draft = getDraft(chatId);
+      const pendingDelete = getPendingDelete(chatId);
+      if (draft || pendingDelete) {
+        await sendMessage(
+          chatId,
+          "Antes de entrar a análisis, termina tu borrador o cancela con <b>cancelar</b>."
+        );
+        return;
+      }
+
+      if (typeof handleAnalysisCommand === "function") {
+        await handleAnalysisCommand({ chatId });
+        return;
+      }
     }
 
     if (low === "confirmar" || low === "/confirm") {

@@ -42,14 +42,17 @@ async function defaultFetchActiveRules(chatId) {
 function buildCacheEntry(rows) {
   const rulesByCard = new Map();
   const activeCardNames = [];
+  const rules = [];
   for (const row of rows) {
     const cardName = String(row.card_name);
     rulesByCard.set(cardName, row);
     activeCardNames.push(cardName);
+    rules.push(row);
   }
   return {
     rulesByCard,
     activeCardNames,
+    rules,
     expiresAt: Date.now() + CACHE_TTL_MS
   };
 }
@@ -96,6 +99,11 @@ export async function getCardRule(chatId, cardName) {
 export async function getActiveCardNames(chatId) {
   const { entry } = await refreshIfNeeded(chatId);
   return entry?.activeCardNames ? [...entry.activeCardNames] : [];
+}
+
+export async function getActiveCardRules(chatId) {
+  const { entry } = await refreshIfNeeded(chatId);
+  return entry?.rules ? [...entry.rules] : [];
 }
 
 export function __setFetchActiveRules(fn) {

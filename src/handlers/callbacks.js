@@ -28,13 +28,19 @@ export function createCallbackHandler({
   mainKeyboardFn = mainKeyboard,
   editMenuKeyboardFn = editMenuKeyboard,
   getActiveCardNamesFn = getActiveCardNames,
-  getBillingMonthForPurchaseFn = getBillingMonthForPurchase
+  getBillingMonthForPurchaseFn = getBillingMonthForPurchase,
+  handleAnalysisCallback
 } = {}) {
   return async function handleCallback(cb) {
     if (!cb?.message?.chat?.id) return;
 
     const chatId = String(cb.message.chat.id);
     const data = cb.data;
+
+    if (data?.startsWith("ANALYSIS:") && typeof handleAnalysisCallback === "function") {
+      const handled = await handleAnalysisCallback(cb);
+      if (handled) return;
+    }
 
     // 🗑️ Confirmar borrado
     if (data === "delete_confirm") {
