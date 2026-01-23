@@ -72,13 +72,27 @@ function analysisPayMenuKeyboard() {
   };
 }
 
+function normalizeBillingMonth(iso) {
+  if (!iso) return iso;
+  if (typeof iso === "object" && "value" in iso) {
+    return iso.value;
+  }
+  return iso;
+}
+
 function monthLabel(iso, format = "long") {
-  const d = new Date(`${iso}T12:00:00Z`);
+  const normalized = normalizeBillingMonth(iso);
+  if (normalized == null) return "Mes desconocido";
+  const rawValue = typeof normalized === "string" ? normalized.trim() : normalized;
+  if (rawValue === "") return "Mes desconocido";
+  const date =
+    rawValue instanceof Date ? rawValue : new Date(`${String(rawValue)}T12:00:00Z`);
+  if (Number.isNaN(date.getTime())) return "Mes desconocido";
   return new Intl.DateTimeFormat("es-MX", {
     timeZone: APP_TZ,
     month: format,
     year: "numeric"
-  }).format(d);
+  }).format(date);
 }
 
 function monthPickerKeyboard(baseMonthISO) {
@@ -410,7 +424,8 @@ export function createAnalysisHandler({
       lines.push("• Sin MSI pendientes.");
     } else {
       for (const row of byMonth) {
-        const label = monthLabel(String(row.billing_month));
+        const monthValue = normalizeBillingMonth(row.billing_month);
+        const label = monthLabel(monthValue);
         lines.push(
           `• ${escapeHtml(label)}: <b>${escapeHtml(formatMoneyMXN(row.total))}</b>`
         );

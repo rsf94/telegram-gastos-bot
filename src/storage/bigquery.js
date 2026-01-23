@@ -321,6 +321,7 @@ export async function getAnalysisPendingMsiTotal({ chatId }) {
     FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
     WHERE chat_id = @chat_id
       AND status != 'PAID'
+      AND billing_month IS NOT NULL
   `;
 
   const options = {
@@ -342,6 +343,7 @@ export async function getAnalysisPendingMsiByCard({ chatId, limit = 6 }) {
     FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
     WHERE chat_id = @chat_id
       AND status != 'PAID'
+      AND billing_month IS NOT NULL
     GROUP BY card_name
     ORDER BY total DESC
     LIMIT @limit
@@ -369,6 +371,7 @@ export async function getAnalysisPendingMsiByMonth({ chatId, startMonthISO, limi
     FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\`
     WHERE chat_id = @chat_id
       AND status != 'PAID'
+      AND billing_month IS NOT NULL
       AND billing_month >= DATE(@start_month)
     GROUP BY billing_month
     ORDER BY billing_month
