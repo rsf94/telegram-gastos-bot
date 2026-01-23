@@ -13,6 +13,7 @@ import { buildLatestEnrichmentRetryQuery } from "../src/storage/bigquery.js";
 import { getDraft, getPendingDelete, __resetState } from "../src/state.js";
 import { guessCategory } from "../src/parsing.js";
 import { __resetConfirmIdempotency } from "../src/cache/confirm_idempotency.js";
+import { helpText, welcomeText } from "../src/ui/copy.js";
 import {
   __resetCardRulesCache,
   __setFetchActiveRules,
@@ -54,6 +55,29 @@ test("normal flow", async () => {
   assert.equal(draft.is_msi, false);
   assert.equal(draft.__state, "awaiting_payment_method");
   assert.ok(messages.at(-1).text.includes("Elige método de pago"));
+});
+
+test("hola returns welcome copy", async () => {
+  __resetState();
+  const { sendMessage, messages } = createMessageSpy();
+  const handler = createMessageHandler({ sendMessage });
+
+  await handler({ chat: { id: 10 }, text: "hola" });
+
+  assert.equal(messages.at(-1).text, welcomeText());
+  assert.ok(messages.at(-1).text.includes("Mándame un gasto"));
+});
+
+test("ayuda returns help copy", async () => {
+  __resetState();
+  const { sendMessage, messages } = createMessageSpy();
+  const handler = createMessageHandler({ sendMessage });
+
+  await handler({ chat: { id: 11 }, text: "ayuda" });
+
+  assert.equal(messages.at(-1).text, helpText());
+  assert.ok(messages.at(-1).text.includes("/analisis"));
+  assert.ok(messages.at(-1).text.includes("/borrar"));
 });
 
 test("msi step1 asks for payment method even without months", async () => {
