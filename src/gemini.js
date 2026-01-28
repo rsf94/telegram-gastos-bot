@@ -13,6 +13,7 @@ import { callDeepSeekEnrich, validateDeepSeekEnrich } from "./deepseek.js";
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const llmCache = new Map();
+const CATEGORY_CONFIDENCE_THRESHOLD = 0.6;
 
 function buildCacheKey(text, baseDraft) {
   const paymentMethod = baseDraft?.payment_method || "";
@@ -86,28 +87,28 @@ function buildPrompt({ text, todayISO }) {
   ].join("\n");
 }
 
-function normalizeCompletion(obj) {
+function normalizeCompletion(obj, { text, baseDraft } = {}) {
   if (!obj || typeof obj !== "object") {
     throw new Error("Respuesta inválida del modelo.");
   }
 
+  const fallback = buildFallback(text || "", baseDraft);
   const category = String(obj.category || "").trim();
-  const merchant = obj.merchant == null ? "" : String(obj.merchant).trim();
-  const description = obj.description == null ? "" : String(obj.description).trim();
+  const merchantRaw = obj.merchant == null ? "" : String(obj.merchant).trim();
+  const descriptionRaw = obj.description == null ? "" : String(obj.description).trim();
+  const isAllowedCategory = category && ALLOWED_CATEGORIES.includes(category);
+  const categoryConfidence = isAllowedCategory ? (category === "Other" ? 0.4 : 0.9) : 0;
+  const normalizedCategory =
+    categoryConfidence >= CATEGORY_CONFIDENCE_THRESHOLD ? category : "Other";
+  const merchant = merchantRaw ? merchantRaw.slice(0, 80) : "";
+  const description = descriptionRaw || fallback.description || "Gasto";
 
-  if (!ALLOWED_CATEGORIES.includes(category)) {
-    throw new Error("Categoría inválida.");
-  }
-
-  if (!description) {
-    throw new Error("Descripción inválida o vacía.");
-  }
-
-  if (merchant.length > 80) {
-    throw new Error("Merchant inválido o demasiado largo.");
-  }
-
-  return { category, merchant, description };
+  return {
+    category: normalizedCategory,
+    merchant,
+    description,
+    category_confidence: categoryConfidence
+  };
 }
 
 async function requestGemini(prompt, { timeoutMs }) {
@@ -145,13 +146,17 @@ async function requestGemini(prompt, { timeoutMs }) {
     const text =
       data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
 
-    return normalizeCompletion(extractJsonObject(text));
+    return extractJsonObject(text);
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
-export async function callGeminiComplete({ text, todayISO = todayISOInTZ() }) {
+export async function callGeminiComplete({
+  text,
+  todayISO = todayISOInTZ(),
+  baseDraft
+}) {
   if (!GEMINI_API_KEY) {
     throw new Error("Missing env var: GEMINI_API_KEY");
   }
@@ -159,7 +164,8 @@ export async function callGeminiComplete({ text, todayISO = todayISOInTZ() }) {
   const prompt = buildPrompt({ text, todayISO });
   const timeoutMs = 4000;
 
-  return requestGemini(prompt, { timeoutMs });
+  const raw = await requestGemini(prompt, { timeoutMs });
+  return normalizeCompletion(raw, { text, baseDraft });
 }
 
 function shortError(error) {
@@ -186,7 +192,7 @@ export async function enrichExpenseLLM({ text, todayISO = todayISOInTZ(), baseDr
   }
 
   try {
-    const completion = await callGeminiComplete({ text, todayISO });
+    const completion = await callGeminiComplete({ text, todayISO, baseDraft });
     const result = { ...completion, llm_provider: "gemini" };
     setCachedEntry(cacheKey, result);
     return { ...result, cache_hit: false };

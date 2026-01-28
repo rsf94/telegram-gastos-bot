@@ -2,6 +2,8 @@ import { DEEPSEEK_API_KEY, ALLOWED_CATEGORIES } from "./config.js";
 import { getAllowedPaymentMethods } from "./cards.js";
 import { todayISOInTZ } from "./parsing.js";
 
+const CATEGORY_CONFIDENCE_THRESHOLD = 0.6;
+
 /* =======================
  * Helpers
  * ======================= */
@@ -418,23 +420,15 @@ export async function validateDeepSeekEnrich(
   const category = String(obj.category || "").trim();
   const merchantRaw = obj.merchant == null ? "" : String(obj.merchant).trim();
   const descriptionRaw = obj.description == null ? "" : String(obj.description).trim();
+  const isAllowedCategory = category && allowedCategories.includes(category);
+  const categoryConfidence = isAllowedCategory ? (category === "Other" ? 0.4 : 0.9) : 0;
+  const normalizedCategory =
+    categoryConfidence >= CATEGORY_CONFIDENCE_THRESHOLD ? category : "Other";
 
-  if (!allowedCategories.includes(category)) {
-    return {
-      ok: false,
-      error: "Categoría inválida. Debe ser una de la lista permitida."
-    };
-  }
+  const trimmedMerchant = merchantRaw ? merchantRaw.slice(0, 80) : "";
+  const description = descriptionRaw || "Gasto";
 
-  if (!descriptionRaw) {
-    return { ok: false, error: "Descripción inválida o vacía." };
-  }
-
-  if (merchantRaw && merchantRaw.length > 80) {
-    return { ok: false, error: "Merchant inválido o demasiado largo." };
-  }
-
-  let merchant = merchantRaw || null;
+  let merchant = trimmedMerchant || null;
   if (merchant && allowedPaymentMethods?.includes(merchant)) {
     merchant = null;
   }
@@ -442,9 +436,10 @@ export async function validateDeepSeekEnrich(
   return {
     ok: true,
     draft: {
-      category,
+      category: normalizedCategory,
       merchant,
-      description: descriptionRaw
+      description,
+      category_confidence: categoryConfidence
     }
   };
 }

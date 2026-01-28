@@ -223,37 +223,48 @@ export async function processEnrichmentRetryQueue({
     }
 
     let enrichment = null;
-    const llmStart = Date.now();
-    try {
-      const ai = await enrichExpenseLLMFn({
-        text: expense.raw_text || "",
-        baseDraft: expense
-      });
+    const hasStoredEnrichment =
+      task.category != null || task.merchant != null || task.description != null;
+
+    if (hasStoredEnrichment) {
       enrichment = {
-        category: ai.category,
-        merchant: ai.merchant,
-        description: ai.description
+        category: task.category || "Other",
+        merchant: task.merchant || null,
+        description: task.description || "Gasto"
       };
-      llmProviders.add(ai.llm_provider || "unknown");
-      llmMsTotal += Date.now() - llmStart;
-    } catch (error) {
-      llmMsTotal += Date.now() - llmStart;
-      const reason = shortError(error);
-      const delayMs = cronBackoffMsForAttempt(attempt);
-      const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
-      const insertStart = Date.now();
-      await insertEnrichmentRetryEventFn({
-        expenseId: task.expense_id,
-        chatId: task.chat_id,
-        attempts: attempt,
-        nextAttemptAt,
-        lastError: reason,
-        status: "FAILED",
-        runId
-      });
-      bqMsTotal += Date.now() - insertStart;
-      failed += 1;
-      continue;
+    } else {
+      const llmStart = Date.now();
+      try {
+        const ai = await enrichExpenseLLMFn({
+          text: expense.raw_text || "",
+          baseDraft: expense
+        });
+        enrichment = {
+          category: ai.category,
+          merchant: ai.merchant,
+          description: ai.description
+        };
+        llmProviders.add(ai.llm_provider || "unknown");
+        llmMsTotal += Date.now() - llmStart;
+      } catch (error) {
+        llmMsTotal += Date.now() - llmStart;
+        const reason = shortError(error);
+        const delayMs = cronBackoffMsForAttempt(attempt);
+        const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
+        const insertStart = Date.now();
+        await insertEnrichmentRetryEventFn({
+          expenseId: task.expense_id,
+          chatId: task.chat_id,
+          attempts: attempt,
+          nextAttemptAt,
+          lastError: reason,
+          status: "FAILED",
+          runId
+        });
+        bqMsTotal += Date.now() - insertStart;
+        failed += 1;
+        continue;
+      }
     }
 
     if (updateExpenseEnrichmentFn) {
