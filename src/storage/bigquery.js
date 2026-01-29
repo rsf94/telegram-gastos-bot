@@ -569,6 +569,26 @@ export function buildLatestEnrichmentRetryQuery({ limit }) {
   `;
 }
 
+export function buildLegacyEnrichmentRetryQuery({ limit }) {
+  return `
+    SELECT
+      expense_id,
+      chat_id,
+      category,
+      merchant,
+      description,
+      attempts,
+      next_attempt_at,
+      last_error,
+      status
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
+    WHERE COALESCE(TIMESTAMP(next_attempt_at), TIMESTAMP("1970-01-01")) <= TIMESTAMP(@now)
+      AND (status IS NULL OR status != "SUCCEEDED")
+    ORDER BY next_attempt_at ASC
+    LIMIT ${limit}
+  `;
+}
+
 export function buildEnrichmentRetryStatsQuery() {
   return `
     WITH latest AS (
@@ -591,42 +611,95 @@ export function buildEnrichmentRetryStatsQuery() {
   `;
 }
 
+export function buildLegacyEnrichmentRetryStatsQuery() {
+  return `
+    SELECT
+      COUNTIF(COALESCE(TIMESTAMP(next_attempt_at), TIMESTAMP("1970-01-01")) > TIMESTAMP(@now)) AS not_due,
+      COUNT(1) AS total_pending
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
+    WHERE (status IS NULL OR status != "SUCCEEDED")
+  `;
+}
+
 export function createEnrichmentRetryStore({ bigqueryClient } = {}) {
   const client = bigqueryClient || bq;
 
+  function isMissingColumnError(error, column) {
+    const msg = String(error?.message || error || "").toLowerCase();
+    return msg.includes(`no such field: ${column}`) || msg.includes(`name ${column} not found`);
+  }
+
   const getDueEnrichmentRetries = async ({ limit = 50, now = new Date() }) => {
     const safeLimit = Number(limit) > 0 ? Number(limit) : 50;
-    const query = buildLatestEnrichmentRetryQuery({ limit: safeLimit });
+    const nowIso = now.toISOString();
     const options = {
-      query,
+      query: buildLatestEnrichmentRetryQuery({ limit: safeLimit }),
       params: {
-        now: now.toISOString()
+        now: nowIso
       },
       parameterMode: "NAMED"
     };
 
-    const [job] = await client.createQueryJob(options);
-    const [rows] = await job.getQueryResults();
-    return rows || [];
+    try {
+      const [job] = await client.createQueryJob(options);
+      const [rows] = await job.getQueryResults();
+      return rows || [];
+    } catch (error) {
+      if (!isMissingColumnError(error, "created_at")) {
+        throw error;
+      }
+      console.warn("enrich_retry_query_fallback: missing created_at, using legacy query");
+      const fallbackOptions = {
+        query: buildLegacyEnrichmentRetryQuery({ limit: safeLimit }),
+        params: {
+          now: nowIso
+        },
+        parameterMode: "NAMED"
+      };
+      const [job] = await client.createQueryJob(fallbackOptions);
+      const [rows] = await job.getQueryResults();
+      return rows || [];
+    }
   };
 
   const getEnrichmentRetryStats = async ({ now = new Date() }) => {
-    const query = buildEnrichmentRetryStatsQuery();
+    const nowIso = now.toISOString();
     const options = {
-      query,
+      query: buildEnrichmentRetryStatsQuery(),
       params: {
-        now: now.toISOString()
+        now: nowIso
       },
       parameterMode: "NAMED"
     };
 
-    const [job] = await client.createQueryJob(options);
-    const [rows] = await job.getQueryResults();
-    const row = rows?.[0] || {};
-    return {
-      notDue: Number(row.not_due || 0),
-      totalPending: Number(row.total_pending || 0)
-    };
+    try {
+      const [job] = await client.createQueryJob(options);
+      const [rows] = await job.getQueryResults();
+      const row = rows?.[0] || {};
+      return {
+        notDue: Number(row.not_due || 0),
+        totalPending: Number(row.total_pending || 0)
+      };
+    } catch (error) {
+      if (!isMissingColumnError(error, "created_at")) {
+        throw error;
+      }
+      console.warn("enrich_retry_stats_fallback: missing created_at, using legacy stats");
+      const fallbackOptions = {
+        query: buildLegacyEnrichmentRetryStatsQuery(),
+        params: {
+          now: nowIso
+        },
+        parameterMode: "NAMED"
+      };
+      const [job] = await client.createQueryJob(fallbackOptions);
+      const [rows] = await job.getQueryResults();
+      const row = rows?.[0] || {};
+      return {
+        notDue: Number(row.not_due || 0),
+        totalPending: Number(row.total_pending || 0)
+      };
+    }
   };
 
   const insertEnrichmentRetryEvent = async ({
