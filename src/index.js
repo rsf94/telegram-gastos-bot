@@ -74,13 +74,15 @@ app.get("/cron/enrich", async (req, res) => {
   const startedAt = Date.now();
   let summary = null;
   let errorShort = null;
+  let limit = 50;
+  let totalMs = 0;
   try {
     const token = String(req.query.token || "");
     if (!process.env.CRON_TOKEN || token !== process.env.CRON_TOKEN) {
       return res.status(401).send("unauthorized");
     }
 
-    const limit = Number(req.query.limit || 50);
+    limit = Number(req.query.limit || 50);
     summary = await processEnrichmentRetryQueue({
       limit,
       getDueEnrichmentRetryTasksFn: getDueEnrichmentRetries,
@@ -93,27 +95,32 @@ app.get("/cron/enrich", async (req, res) => {
     errorShort = String(e?.message || e || "").split("\n")[0].slice(0, 180);
     if (!summary) {
       summary = {
+        claimed: 0,
         processed: 0,
-        succeeded: 0,
+        done: 0,
         failed: 0,
-        skipped: 0,
+        skipped_not_due: 0,
+        skipped_noop: 0,
         llmMs: 0,
         bqMs: 0,
         llmProviders: []
       };
     }
   } finally {
-    const totalMs = Date.now() - startedAt;
+    totalMs = Date.now() - startedAt;
     const providers = summary?.llmProviders || [];
     const llmProvider =
-      providers.length === 0 ? "unknown" : providers.length === 1 ? providers[0] : "mixed";
+      providers.length === 0 ? "none" : providers.length === 1 ? providers[0] : "mixed";
     const payload = {
       type: "cron_enrich",
+      limit,
+      claimed: summary?.claimed || 0,
       processed: summary?.processed || 0,
-      succeeded: summary?.succeeded || 0,
+      done: summary?.done || 0,
       failed: summary?.failed || 0,
-      skipped: summary?.skipped || 0,
-      llm_provider: llmProvider,
+      skipped_not_due: summary?.skipped_not_due || 0,
+      skipped_noop: summary?.skipped_noop || 0,
+      provider: llmProvider,
       llm_ms: summary?.llmMs || 0,
       bq_ms: summary?.bqMs || 0,
       total_ms: totalMs,
@@ -124,10 +131,22 @@ app.get("/cron/enrich", async (req, res) => {
 
   return res.status(200).json({
     ok: true,
+    limit,
+    claimed: summary?.claimed || 0,
     processed: summary?.processed || 0,
-    succeeded: summary?.succeeded || 0,
+    done: summary?.done || 0,
     failed: summary?.failed || 0,
-    skipped: summary?.skipped || 0
+    skipped_not_due: summary?.skipped_not_due || 0,
+    skipped_noop: summary?.skipped_noop || 0,
+    llm_ms: summary?.llmMs || 0,
+    bq_ms: summary?.bqMs || 0,
+    total_ms: totalMs,
+    provider:
+      summary?.llmProviders?.length === 0
+        ? "none"
+        : summary?.llmProviders?.length === 1
+          ? summary.llmProviders[0]
+          : "mixed"
   });
 });
 

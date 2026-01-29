@@ -161,7 +161,55 @@ La app expone:
 - `GET /` → `OK`
 - `POST /telegram-webhook` → endpoint para webhook de Telegram
 - `GET /cron/daily?token=...` → recordatorios diarios (corte/pago)
-- `GET /cron/enrich?token=...` → reintentos de enriquecimiento LLM
+- `GET /cron/enrich?token=...` → reintentos de enriquecimiento LLM (devuelve JSON con summary)
+
+---
+
+## 🧪 Debug de `/cron/enrich`
+
+Puedes pegar el URL directamente en el navegador o `curl` y ver un JSON de resumen:
+
+```json
+{
+  "ok": true,
+  "limit": 50,
+  "claimed": 3,
+  "processed": 3,
+  "done": 2,
+  "failed": 1,
+  "skipped_not_due": 4,
+  "skipped_noop": 0,
+  "llm_ms": 1200,
+  "bq_ms": 350,
+  "total_ms": 1700,
+  "provider": "gemini"
+}
+```
+
+Notas:
+- `claimed` = filas “due” tomadas del queue.
+- `skipped_not_due` = filas pendientes pero aún no toca procesarlas.
+- `skipped_noop` = no había nada por hacer.
+- `provider` = `gemini`, `deepseek`, `mixed` o `none`.
+
+### Cola `enrichment_retry` (append-only)
+
+El cron escribe eventos con `INSERT` (sin `UPDATE/DELETE`) para evitar fallos por streaming buffer.
+La lectura siempre usa el **último estado por `expense_id`** (ventana + `QUALIFY`), así que el
+workflow es:
+
+1) Insert `RUNNING`
+2) Insert `SUCCEEDED` o `FAILED` con `next_attempt_at` futuro
+
+Si necesitas depurar, consulta los eventos por `expense_id` y ordena por `updated_at`.
+
+---
+
+## ✅ Tests (smoke)
+
+```bash
+npm run smoke
+```
 
 ---
 
