@@ -1,6 +1,12 @@
 import crypto from "crypto";
 import { enrichExpenseLLM } from "../gemini.js";
-import { getExpenseById, insertEnrichmentRetryEvent } from "../storage/bigquery.js";
+import {
+  createEnrichmentRetryStore,
+  getDueEnrichmentRetries,
+  getEnrichmentRetryStats,
+  getExpenseById,
+  insertEnrichmentRetryEvent
+} from "../storage/bigquery.js";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -142,22 +148,55 @@ function cronBackoffMsForAttempt(attempt) {
 
 export async function processEnrichmentRetryQueue({
   limit = 50,
-  getDueEnrichmentRetryTasksFn,
+  getDueEnrichmentRetryTasksFn = getDueEnrichmentRetries,
+  getEnrichmentRetryStatsFn = getEnrichmentRetryStats,
   getExpenseByIdFn = getExpenseById,
   enrichExpenseLLMFn = enrichExpenseLLM,
   updateExpenseEnrichmentFn,
   insertEnrichmentRetryEventFn = insertEnrichmentRetryEvent,
   nowFn = () => new Date(),
-  runId = crypto.randomUUID()
+  runId = crypto.randomUUID(),
+  bigqueryClient
 }) {
+  const store = bigqueryClient ? createEnrichmentRetryStore({ bigqueryClient }) : null;
+  const hasCustomDueFn = getDueEnrichmentRetryTasksFn !== getDueEnrichmentRetries;
+  const hasCustomStatsFn = getEnrichmentRetryStatsFn !== getEnrichmentRetryStats;
+  const hasCustomExpenseFn = getExpenseByIdFn !== getExpenseById;
+  const hasCustomInsertFn = insertEnrichmentRetryEventFn !== insertEnrichmentRetryEvent;
+
+  const getDueTasks =
+    !hasCustomDueFn && store?.getDueEnrichmentRetries
+      ? store.getDueEnrichmentRetries
+      : getDueEnrichmentRetryTasksFn;
+  let getStats = null;
+  if (hasCustomStatsFn) {
+    getStats = getEnrichmentRetryStatsFn;
+  } else if (!hasCustomDueFn) {
+    getStats = store?.getEnrichmentRetryStats || getEnrichmentRetryStatsFn;
+  }
+  const getExpense =
+    !hasCustomExpenseFn && store?.getExpenseById ? store.getExpenseById : getExpenseByIdFn;
+  const insertEvent =
+    !hasCustomInsertFn && store?.insertEnrichmentRetryEvent
+      ? store.insertEnrichmentRetryEvent
+      : insertEnrichmentRetryEventFn;
+
   const now = nowFn();
-  const tasks = await getDueEnrichmentRetryTasksFn({ limit, now });
+  const tasks = await getDueTasks({ limit, now });
   let succeeded = 0;
   let failed = 0;
   let skipped = 0;
   let llmMsTotal = 0;
   let bqMsTotal = 0;
+  let skippedNotDue = 0;
   const llmProviders = new Set();
+  let pendingTotal = 0;
+
+  if (getStats) {
+    const stats = await getStats({ now });
+    skippedNotDue = Number(stats?.notDue || 0);
+    pendingTotal = Number(stats?.totalPending || 0);
+  }
 
   for (const task of tasks) {
     if (!task?.expense_id || !task?.chat_id) {
@@ -167,7 +206,7 @@ export async function processEnrichmentRetryQueue({
 
     const attempt = Number(task.attempts || 0) + 1;
     const runningStart = Date.now();
-    await insertEnrichmentRetryEventFn({
+    await insertEvent({
       expenseId: task.expense_id,
       chatId: task.chat_id,
       attempts: attempt,
@@ -180,7 +219,7 @@ export async function processEnrichmentRetryQueue({
 
     let expense = null;
     try {
-      expense = await getExpenseByIdFn({
+      expense = await getExpense({
         chatId: task.chat_id,
         expenseId: task.expense_id
       });
@@ -189,7 +228,7 @@ export async function processEnrichmentRetryQueue({
       const delayMs = cronBackoffMsForAttempt(attempt);
       const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
       const insertStart = Date.now();
-      await insertEnrichmentRetryEventFn({
+      await insertEvent({
         expenseId: task.expense_id,
         chatId: task.chat_id,
         attempts: attempt,
@@ -208,7 +247,7 @@ export async function processEnrichmentRetryQueue({
       const delayMs = cronBackoffMsForAttempt(attempt);
       const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
       const insertStart = Date.now();
-      await insertEnrichmentRetryEventFn({
+      await insertEvent({
         expenseId: task.expense_id,
         chatId: task.chat_id,
         attempts: attempt,
@@ -252,7 +291,7 @@ export async function processEnrichmentRetryQueue({
         const delayMs = cronBackoffMsForAttempt(attempt);
         const nextAttemptAt = new Date(nowFn().getTime() + delayMs).toISOString();
         const insertStart = Date.now();
-        await insertEnrichmentRetryEventFn({
+        await insertEvent({
           expenseId: task.expense_id,
           chatId: task.chat_id,
           attempts: attempt,
@@ -287,7 +326,7 @@ export async function processEnrichmentRetryQueue({
           ? new Date(nowFn().getTime() + delayMs).toISOString()
           : new Date(nowFn().getTime() + cronBackoffMsForAttempt(6)).toISOString();
         const insertStart = Date.now();
-        await insertEnrichmentRetryEventFn({
+        await insertEvent({
           expenseId: task.expense_id,
           chatId: task.chat_id,
           attempts: attempt,
@@ -306,7 +345,7 @@ export async function processEnrichmentRetryQueue({
     }
 
     const successStart = Date.now();
-    await insertEnrichmentRetryEventFn({
+    await insertEvent({
       expenseId: task.expense_id,
       chatId: task.chat_id,
       attempts: attempt,
@@ -322,14 +361,21 @@ export async function processEnrichmentRetryQueue({
     succeeded += 1;
   }
 
+  const processed = succeeded + failed;
+  const skippedNoop = tasks.length === 0 && skippedNotDue === 0 ? 1 : 0;
+
   return {
-    processed: tasks.length,
-    succeeded,
+    claimed: tasks.length,
+    processed,
+    done: succeeded,
     failed,
-    skipped,
+    skipped_not_due: skippedNotDue,
+    skipped_noop: skippedNoop,
     llmMs: llmMsTotal,
     bqMs: bqMsTotal,
-    llmProviders: Array.from(llmProviders)
+    llmProviders: Array.from(llmProviders),
+    pending: pendingTotal,
+    skipped_invalid: skipped
   };
 }
 

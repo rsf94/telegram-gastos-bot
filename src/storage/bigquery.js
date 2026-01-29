@@ -571,21 +571,195 @@ export function buildLatestEnrichmentRetryQuery({ limit }) {
   `;
 }
 
-export async function getDueEnrichmentRetries({ limit = 50, now = new Date() }) {
-  const safeLimit = Number(limit) > 0 ? Number(limit) : 50;
-  const query = buildLatestEnrichmentRetryQuery({ limit: safeLimit });
+export function buildEnrichmentRetryStatsQuery() {
+  return `
+    WITH latest AS (
+      SELECT
+        expense_id,
+        next_attempt_at,
+        status,
+        created_at,
+        updated_at
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY expense_id
+        ORDER BY updated_at DESC, created_at DESC
+      ) = 1
+    )
+    SELECT
+      COUNTIF(COALESCE(next_attempt_at, TIMESTAMP("1970-01-01")) > TIMESTAMP(@now)) AS not_due,
+      COUNT(1) AS total_pending
+    FROM latest
+    WHERE (status IS NULL OR status != "SUCCEEDED")
+  `;
+}
 
-  const options = {
-    query,
-    params: {
-      now: now.toISOString()
-    },
-    parameterMode: "NAMED"
+export function createEnrichmentRetryStore({ bigqueryClient } = {}) {
+  const client = bigqueryClient || bq;
+
+  const getDueEnrichmentRetries = async ({ limit = 50, now = new Date() }) => {
+    const safeLimit = Number(limit) > 0 ? Number(limit) : 50;
+    const query = buildLatestEnrichmentRetryQuery({ limit: safeLimit });
+    const options = {
+      query,
+      params: {
+        now: now.toISOString()
+      },
+      parameterMode: "NAMED"
+    };
+
+    const [job] = await client.createQueryJob(options);
+    const [rows] = await job.getQueryResults();
+    return rows || [];
   };
 
-  const [job] = await bq.createQueryJob(options);
-  const [rows] = await job.getQueryResults();
-  return rows || [];
+  const getEnrichmentRetryStats = async ({ now = new Date() }) => {
+    const query = buildEnrichmentRetryStatsQuery();
+    const options = {
+      query,
+      params: {
+        now: now.toISOString()
+      },
+      parameterMode: "NAMED"
+    };
+
+    const [job] = await client.createQueryJob(options);
+    const [rows] = await job.getQueryResults();
+    const row = rows?.[0] || {};
+    return {
+      notDue: Number(row.not_due || 0),
+      totalPending: Number(row.total_pending || 0)
+    };
+  };
+
+  const insertEnrichmentRetryEvent = async ({
+    expenseId,
+    chatId,
+    category,
+    merchant,
+    description,
+    attempts = 0,
+    nextAttemptAt,
+    lastError,
+    status = "PENDING",
+    runId,
+    eventId
+  }) => {
+    const table = client.dataset(BQ_DATASET).table(BQ_ENRICHMENT_RETRY_TABLE);
+    const nowISO = new Date().toISOString();
+    await table.insert(
+      [
+        {
+          event_id: String(eventId || crypto.randomUUID()),
+          run_id: runId ? String(runId) : null,
+          expense_id: String(expenseId),
+          chat_id: String(chatId),
+          status: String(status),
+          category: category ? String(category) : null,
+          merchant: merchant ? String(merchant) : null,
+          description: description ? String(description) : null,
+          attempts: Number(attempts || 0),
+          next_attempt_at: nextAttemptAt || null,
+          last_error: lastError || null,
+          created_at: nowISO,
+          updated_at: nowISO
+        }
+      ],
+      { skipInvalidRows: false, ignoreUnknownValues: false }
+    );
+  };
+
+  const getExpenseById = async ({ chatId, expenseId }) => {
+    const query = `
+      SELECT
+        id,
+        purchase_date,
+        amount_mxn,
+        payment_method,
+        category,
+        merchant,
+        description,
+        raw_text,
+        is_msi,
+        msi_months,
+        msi_total_amount
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+      WHERE chat_id = @chat_id
+        AND id = @expense_id
+      LIMIT 1
+    `;
+
+    const options = {
+      query,
+      params: {
+        chat_id: String(chatId),
+        expense_id: String(expenseId)
+      },
+      parameterMode: "NAMED"
+    };
+
+    const [job] = await client.createQueryJob(options);
+    const [rows] = await job.getQueryResults();
+    return rows?.[0] || null;
+  };
+
+  const updateExpenseEnrichment = async ({
+    chatId,
+    expenseId,
+    category,
+    merchant,
+    description
+  }) => {
+    const query = `
+      UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+      SET
+        category = @category,
+        merchant = @merchant,
+        description = @description
+      WHERE chat_id = @chat_id
+        AND id = @expense_id
+    `;
+
+    const options = {
+      query,
+      params: {
+        chat_id: String(chatId),
+        expense_id: String(expenseId),
+        category: String(category || "Other"),
+        merchant: merchant ? String(merchant) : null,
+        description: description ? String(description) : null
+      },
+      parameterMode: "NAMED"
+    };
+
+    const [job] = await client.createQueryJob(options);
+    await job.getQueryResults();
+    const [metadata] = await job.getMetadata();
+    const affected = Number(metadata?.statistics?.query?.numDmlAffectedRows || 0);
+    if (!affected) {
+      const err = new Error("BQ_UPDATE_NO_ROWS");
+      err.code = "BQ_UPDATE_NO_ROWS";
+      throw err;
+    }
+
+    return affected;
+  };
+
+  return {
+    getDueEnrichmentRetries,
+    getEnrichmentRetryStats,
+    insertEnrichmentRetryEvent,
+    getExpenseById,
+    updateExpenseEnrichment
+  };
+}
+
+export async function getDueEnrichmentRetries({ limit = 50, now = new Date() }) {
+  return createEnrichmentRetryStore().getDueEnrichmentRetries({ limit, now });
+}
+
+export async function getEnrichmentRetryStats({ now = new Date() }) {
+  return createEnrichmentRetryStore().getEnrichmentRetryStats({ now });
 }
 
 export async function insertEnrichmentRetryEvent({
@@ -601,28 +775,19 @@ export async function insertEnrichmentRetryEvent({
   runId,
   eventId
 }) {
-  const table = bq.dataset(BQ_DATASET).table(BQ_ENRICHMENT_RETRY_TABLE);
-  const nowISO = new Date().toISOString();
-  await table.insert(
-    [
-      {
-        event_id: String(eventId || crypto.randomUUID()),
-        run_id: runId ? String(runId) : null,
-        expense_id: String(expenseId),
-        chat_id: String(chatId),
-        status: String(status),
-        category: category ? String(category) : null,
-        merchant: merchant ? String(merchant) : null,
-        description: description ? String(description) : null,
-        attempts: Number(attempts || 0),
-        next_attempt_at: nextAttemptAt || null,
-        last_error: lastError || null,
-        created_at: nowISO,
-        updated_at: nowISO
-      }
-    ],
-    { skipInvalidRows: false, ignoreUnknownValues: false }
-  );
+  return createEnrichmentRetryStore().insertEnrichmentRetryEvent({
+    expenseId,
+    chatId,
+    category,
+    merchant,
+    description,
+    attempts,
+    nextAttemptAt,
+    lastError,
+    status,
+    runId,
+    eventId
+  });
 }
 
 /* =======================
