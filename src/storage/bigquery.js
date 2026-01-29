@@ -543,12 +543,11 @@ export function buildLatestEnrichmentRetryQuery({ limit }) {
         next_attempt_at,
         last_error,
         status,
-        created_at,
-        updated_at
+        created_at
       FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
       QUALIFY ROW_NUMBER() OVER (
         PARTITION BY expense_id
-        ORDER BY updated_at DESC, created_at DESC
+        ORDER BY created_at DESC
       ) = 1
     )
     SELECT
@@ -561,8 +560,7 @@ export function buildLatestEnrichmentRetryQuery({ limit }) {
       next_attempt_at,
       last_error,
       status,
-      created_at,
-      updated_at
+      created_at
     FROM latest
     WHERE COALESCE(next_attempt_at, TIMESTAMP("1970-01-01")) <= TIMESTAMP(@now)
       AND (status IS NULL OR status != "SUCCEEDED")
@@ -578,12 +576,11 @@ export function buildEnrichmentRetryStatsQuery() {
         expense_id,
         next_attempt_at,
         status,
-        created_at,
-        updated_at
+        created_at
       FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_ENRICHMENT_RETRY_TABLE}\`
       QUALIFY ROW_NUMBER() OVER (
         PARTITION BY expense_id
-        ORDER BY updated_at DESC, created_at DESC
+        ORDER BY created_at DESC
       ) = 1
     )
     SELECT
@@ -665,7 +662,7 @@ export function createEnrichmentRetryStore({ bigqueryClient } = {}) {
           updated_at: nowISO
         }
       ],
-      { skipInvalidRows: false, ignoreUnknownValues: false }
+      { skipInvalidRows: false, ignoreUnknownValues: true }
     );
   };
 

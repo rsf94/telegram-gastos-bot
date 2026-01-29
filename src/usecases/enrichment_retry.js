@@ -193,9 +193,14 @@ export async function processEnrichmentRetryQueue({
   let pendingTotal = 0;
 
   if (getStats) {
-    const stats = await getStats({ now });
-    skippedNotDue = Number(stats?.notDue || 0);
-    pendingTotal = Number(stats?.totalPending || 0);
+    try {
+      const stats = await getStats({ now });
+      skippedNotDue = Number(stats?.notDue || 0);
+      pendingTotal = Number(stats?.totalPending || 0);
+    } catch (error) {
+      const reason = shortError(error);
+      console.warn(`enrich_retry_stats_error: ${reason}`);
+    }
   }
 
   for (const task of tasks) {
