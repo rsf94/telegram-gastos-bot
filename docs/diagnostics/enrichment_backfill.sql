@@ -1,5 +1,11 @@
--- Backfill: encola enriquecimientos para gastos recientes con merchant vacío o category=Other.
--- Ajusta PROJECT_ID/DATASET, y ventana de fechas según tu necesidad.
+-- Backfill: encola enriquecimientos para gastos recientes con enrichment incompleto.
+-- Ajusta PROJECT_ID/DATASET, y ventana de días según tu necesidad.
+DECLARE days_back INT64 DEFAULT 14;
+DECLARE run_id STRING DEFAULT FORMAT_TIMESTAMP(
+  'manual_backfill_%Y%m%d_%H%M%S',
+  CURRENT_TIMESTAMP()
+);
+
 INSERT INTO `PROJECT_ID.DATASET.enrichment_retry` (
   event_id,
   run_id,
@@ -17,7 +23,7 @@ INSERT INTO `PROJECT_ID.DATASET.enrichment_retry` (
 )
 SELECT
   GENERATE_UUID() AS event_id,
-  'manual_backfill_2026_01_20' AS run_id,
+  run_id AS run_id,
   e.id AS expense_id,
   e.chat_id AS chat_id,
   'PENDING' AS status,
@@ -30,6 +36,16 @@ SELECT
   CURRENT_TIMESTAMP() AS created_at,
   CURRENT_TIMESTAMP() AS updated_at
 FROM `PROJECT_ID.DATASET.expenses` e
-WHERE e.created_at >= TIMESTAMP('2026-01-20')
-  AND (e.category IS NULL OR e.category = 'Other'
-       OR e.merchant IS NULL OR TRIM(e.merchant) = '');
+WHERE e.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL days_back DAY)
+  AND (
+    e.category IS NULL OR e.category = 'Other'
+    OR e.merchant IS NULL OR TRIM(e.merchant) = ''
+    OR e.description IS NULL OR TRIM(e.description) = ''
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM `PROJECT_ID.DATASET.enrichment_retry` r
+    WHERE r.expense_id = e.id
+      AND r.chat_id = e.chat_id
+      AND r.status IN ('PENDING', 'PROCESSING')
+  );
