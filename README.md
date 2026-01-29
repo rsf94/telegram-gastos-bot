@@ -186,6 +186,30 @@ curl -s "https://api.telegram.org/bot$TG_TOKEN/getWebhookInfo"
 
 ---
 
+## 🔁 Cómo re-enriquecer gastos existentes (backfill)
+
+Para corregir gastos recientes que quedaron con categoría `Other` o con `merchant`/`description` vacíos:
+
+1) Abre `docs/diagnostics/enrichment_backfill.sql` y ajusta:
+   - `PROJECT_ID.DATASET`
+   - `days_back` (ventana en días a revisar)
+
+2) Ejecuta el SQL en BigQuery (es un one-shot que encola en `enrichment_retry`):
+
+```sql
+-- backfill
+```
+
+3) Lanza el cron de enriquecimiento para procesar la cola:
+
+```bash
+curl -s "https://TU-CLOUD-RUN-URL/cron/enrich?token=TU_CRON_TOKEN"
+```
+
+> Nota: el backfill evita duplicados si ya hay eventos `PENDING/PROCESSING` para el mismo `expense_id` + `chat_id`. El `run_id` y un UUID se guardan en `last_error` para trazabilidad sin cambiar el esquema.
+
+---
+
 ## 🧪 Desarrollo local rápido
 
 ```bash
