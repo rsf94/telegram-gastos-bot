@@ -206,7 +206,7 @@ Para corregir gastos recientes que quedaron con categoría `Other` o con `mercha
 curl -s "https://TU-CLOUD-RUN-URL/cron/enrich?token=TU_CRON_TOKEN"
 ```
 
-> Nota: el backfill evita duplicados si ya hay eventos `PENDING/PROCESSING` para el mismo `expense_id` + `chat_id`.
+> Nota: el backfill evita duplicados si ya hay eventos `PENDING/PROCESSING` para el mismo `expense_id` + `chat_id`. El `run_id` y un UUID se guardan en `last_error` para trazabilidad sin cambiar el esquema.
 
 ---
 

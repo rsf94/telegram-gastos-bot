@@ -5,10 +5,9 @@ DECLARE run_id STRING DEFAULT FORMAT_TIMESTAMP(
   'manual_backfill_%Y%m%d_%H%M%S',
   CURRENT_TIMESTAMP()
 );
+DECLARE event_id STRING DEFAULT GENERATE_UUID();
 
 INSERT INTO `PROJECT_ID.DATASET.enrichment_retry` (
-  event_id,
-  run_id,
   expense_id,
   chat_id,
   status,
@@ -22,8 +21,6 @@ INSERT INTO `PROJECT_ID.DATASET.enrichment_retry` (
   updated_at
 )
 SELECT
-  GENERATE_UUID() AS event_id,
-  run_id AS run_id,
   e.id AS expense_id,
   e.chat_id AS chat_id,
   'PENDING' AS status,
@@ -32,7 +29,7 @@ SELECT
   NULL AS description,
   0 AS attempts,
   CURRENT_TIMESTAMP() AS next_attempt_at,
-  'backfill_missing_enrichment' AS last_error,
+  CONCAT('backfill_missing_enrichment:', run_id, ':', event_id) AS last_error,
   CURRENT_TIMESTAMP() AS created_at,
   CURRENT_TIMESTAMP() AS updated_at
 FROM `PROJECT_ID.DATASET.expenses` e
