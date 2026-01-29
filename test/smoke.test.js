@@ -618,7 +618,7 @@ test("enrichment cron records success events", async () => {
   });
 
   assert.equal(result.processed, 1);
-  assert.equal(result.succeeded, 1);
+  assert.equal(result.done, 1);
   assert.ok(inserts.some((row) => row.status === "RUNNING"));
   assert.ok(inserts.some((row) => row.status === "SUCCEEDED"));
 });
