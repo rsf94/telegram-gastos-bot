@@ -530,6 +530,21 @@ export async function enqueueEnrichmentRetry({
   });
 }
 
+function isMissingColumnError(error, column) {
+  const msg = String(error?.message || error || "").toLowerCase();
+  return msg.includes(`no such field: ${column}`) || msg.includes(`name ${column} not found`);
+}
+
+function omitColumns(row, columns) {
+  if (!columns?.length) return row;
+  return Object.fromEntries(Object.entries(row).filter(([key]) => !columns.includes(key)));
+}
+
+function missingColumnsFromError(error) {
+  const candidates = ["event_id", "run_id", "created_at", "updated_at"];
+  return candidates.filter((column) => isMissingColumnError(error, column));
+}
+
 export function buildLatestEnrichmentRetryQuery({ limit }) {
   return `
     WITH latest AS (
@@ -624,11 +639,6 @@ export function buildLegacyEnrichmentRetryStatsQuery() {
 export function createEnrichmentRetryStore({ bigqueryClient } = {}) {
   const client = bigqueryClient || bq;
 
-  function isMissingColumnError(error, column) {
-    const msg = String(error?.message || error || "").toLowerCase();
-    return msg.includes(`no such field: ${column}`) || msg.includes(`name ${column} not found`);
-  }
-
   const getDueEnrichmentRetries = async ({ limit = 50, now = new Date() }) => {
     const safeLimit = Number(limit) > 0 ? Number(limit) : 50;
     const nowIso = now.toISOString();
@@ -717,26 +727,39 @@ export function createEnrichmentRetryStore({ bigqueryClient } = {}) {
   }) => {
     const table = client.dataset(BQ_DATASET).table(BQ_ENRICHMENT_RETRY_TABLE);
     const nowISO = new Date().toISOString();
-    await table.insert(
-      [
-        {
-          event_id: String(eventId || crypto.randomUUID()),
-          run_id: runId ? String(runId) : null,
-          expense_id: String(expenseId),
-          chat_id: String(chatId),
-          status: String(status),
-          category: category ? String(category) : null,
-          merchant: merchant ? String(merchant) : null,
-          description: description ? String(description) : null,
-          attempts: Number(attempts || 0),
-          next_attempt_at: nextAttemptAt || null,
-          last_error: lastError || null,
-          created_at: nowISO,
-          updated_at: nowISO
+    const fullRow = {
+      event_id: String(eventId || crypto.randomUUID()),
+      run_id: runId ? String(runId) : null,
+      expense_id: String(expenseId),
+      chat_id: String(chatId),
+      status: String(status),
+      category: category ? String(category) : null,
+      merchant: merchant ? String(merchant) : null,
+      description: description ? String(description) : null,
+      attempts: Number(attempts || 0),
+      next_attempt_at: nextAttemptAt || null,
+      last_error: lastError || null,
+      created_at: nowISO,
+      updated_at: nowISO
+    };
+
+    let row = fullRow;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: true });
+        return;
+      } catch (error) {
+        const missing = missingColumnsFromError(error);
+        if (missing.length === 0) {
+          throw error;
         }
-      ],
-      { skipInvalidRows: false, ignoreUnknownValues: true }
-    );
+        const trimmedRow = omitColumns(row, missing);
+        if (Object.keys(trimmedRow).length === Object.keys(row).length) {
+          throw error;
+        }
+        row = trimmedRow;
+      }
+    }
   };
 
   const getExpenseById = async ({ chatId, expenseId }) => {
