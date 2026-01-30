@@ -209,7 +209,7 @@ export function createAnalysisHandler({
     }
   }
 
-  async function handleMonthSummary(chatId) {
+  async function handleMonthSummary(chatId, requestId) {
     const startedAt = Date.now();
     let bqMs = 0;
     const monthISO = startOfMonthISO(todayISOInTZ());
@@ -254,15 +254,18 @@ export function createAnalysisHandler({
 
     const totalMs = Date.now() - startedAt;
     logPerf({
+      request_id: requestId || null,
       flow: "analysis:month_summary",
       bq_ms: bqMs,
+      llm_ms: 0,
       total_ms: totalMs,
       chat_id: chatId,
-      option: "MONTH_SUMMARY"
+      option: "MONTH_SUMMARY",
+      status: "ok"
     });
   }
 
-  async function handlePayMonth(chatId, monthISO) {
+  async function handlePayMonth(chatId, monthISO, requestId) {
     const startedAt = Date.now();
     let bqMs = 0;
 
@@ -371,15 +374,18 @@ export function createAnalysisHandler({
 
     const totalMs = Date.now() - startedAt;
     logPerf({
+      request_id: requestId || null,
       flow: "analysis:pay_month",
       bq_ms: bqMs,
+      llm_ms: 0,
       total_ms: totalMs,
       chat_id: chatId,
-      option: "PAY_MONTH"
+      option: "PAY_MONTH",
+      status: "ok"
     });
   }
 
-  async function handlePendingMsi(chatId) {
+  async function handlePendingMsi(chatId, requestId) {
     const startedAt = Date.now();
     let bqMs = 0;
     const startMonthISO = startOfMonthISO(todayISOInTZ());
@@ -436,15 +442,18 @@ export function createAnalysisHandler({
 
     const totalMs = Date.now() - startedAt;
     logPerf({
+      request_id: requestId || null,
       flow: "analysis:msi_pending",
       bq_ms: bqMs,
+      llm_ms: 0,
       total_ms: totalMs,
       chat_id: chatId,
-      option: "MSI_PENDING"
+      option: "MSI_PENDING",
+      status: "ok"
     });
   }
 
-  async function handleCategoryDelta(chatId) {
+  async function handleCategoryDelta(chatId, requestId) {
     const startedAt = Date.now();
     let bqMs = 0;
     const monthISO = startOfMonthISO(todayISOInTZ());
@@ -517,27 +526,41 @@ export function createAnalysisHandler({
 
     const totalMs = Date.now() - startedAt;
     logPerf({
+      request_id: requestId || null,
       flow: "analysis:category_delta",
       bq_ms: bqMs,
+      llm_ms: 0,
       total_ms: totalMs,
       chat_id: chatId,
-      option: "CATEGORY_DELTA"
+      option: "CATEGORY_DELTA",
+      status: "ok"
     });
   }
 
-  async function handleAnalysisCommand({ chatId }) {
+  async function handleAnalysisCommand({ chatId, requestId }) {
+    logPerf({
+      request_id: requestId || null,
+      flow: "analysis:menu",
+      option: "MENU",
+      chat_id: chatId,
+      bq_ms: 0,
+      llm_ms: 0,
+      total_ms: 0,
+      status: "ok"
+    });
     await sendMenu(chatId);
   }
 
-  async function handleAnalysisCallback(cb) {
+  async function handleAnalysisCallback(cb, { requestId } = {}) {
     if (!cb?.data?.startsWith(ANALYSIS_PREFIX)) return false;
 
     const chatId = String(cb.message.chat.id);
     const data = cb.data;
+    const startedAt = Date.now();
 
     try {
       if (data === `${ANALYSIS_PREFIX}MONTH_SUMMARY`) {
-        await handleMonthSummary(chatId);
+        await handleMonthSummary(chatId, requestId);
         await answerCallback(cb.id);
         return true;
       }
@@ -556,14 +579,14 @@ export function createAnalysisHandler({
 
       if (data === `${ANALYSIS_PREFIX}PAY_THIS_MONTH`) {
         const monthISO = startOfMonthISO(todayISOInTZ());
-        await handlePayMonth(chatId, monthISO);
+        await handlePayMonth(chatId, monthISO, requestId);
         await answerCallback(cb.id);
         return true;
       }
 
       if (data === `${ANALYSIS_PREFIX}PAY_NEXT_MONTH`) {
         const monthISO = addMonthsISO(startOfMonthISO(todayISOInTZ()), 1);
-        await handlePayMonth(chatId, monthISO);
+        await handlePayMonth(chatId, monthISO, requestId);
         await answerCallback(cb.id);
         return true;
       }
@@ -571,20 +594,20 @@ export function createAnalysisHandler({
       if (data?.startsWith(`${ANALYSIS_PREFIX}PAY_MONTH:`)) {
         const monthISO = parseAnalysisMonth(data);
         if (monthISO) {
-          await handlePayMonth(chatId, monthISO);
+          await handlePayMonth(chatId, monthISO, requestId);
         }
         await answerCallback(cb.id);
         return true;
       }
 
       if (data === `${ANALYSIS_PREFIX}MSI_PENDING`) {
-        await handlePendingMsi(chatId);
+        await handlePendingMsi(chatId, requestId);
         await answerCallback(cb.id);
         return true;
       }
 
       if (data === `${ANALYSIS_PREFIX}CATEGORY_DELTA`) {
-        await handleCategoryDelta(chatId);
+        await handleCategoryDelta(chatId, requestId);
         await answerCallback(cb.id);
         return true;
       }
@@ -595,6 +618,21 @@ export function createAnalysisHandler({
         return true;
       }
     } catch (error) {
+      const totalMs = Date.now() - startedAt;
+      logPerf(
+        {
+          request_id: requestId || null,
+          flow: "analysis:error",
+          option: "CALLBACK_ERROR",
+          chat_id: chatId,
+          bq_ms: 0,
+          llm_ms: 0,
+          total_ms: totalMs,
+          status: "error",
+          error: String(error?.message || error || "").split("\n")[0].slice(0, 180)
+        },
+        "warn"
+      );
       console.error(error);
       await sendMessage(chatId, "Ocurrió un error al generar el análisis.");
       await answerCallback(cb.id);

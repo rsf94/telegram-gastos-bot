@@ -21,6 +21,7 @@ function logPerf(payload, level = "log") {
 export async function deleteExpense({
   chatId,
   pendingDelete,
+  requestId = null,
   deleteExpenseFn = deleteExpenseCascade,
   sendMessage = tgSend
 }) {
@@ -34,15 +35,17 @@ export async function deleteExpense({
 
     const bqMs = Date.now() - bqStart;
     logPerf({
+      request_id: requestId,
       flow: "expense_delete",
+      option: "DELETE",
+      chat_id: chatId,
       local_parse_ms: 0,
       llm_ms: 0,
       bq_ms: bqMs,
       total_ms: bqMs,
       llm_provider: null,
       cache_hit: { card_rules: null, llm: false },
-      ok: true,
-      err_short: null
+      status: "ok"
     });
 
     await sendMessage(
@@ -55,15 +58,18 @@ export async function deleteExpense({
     const bqMs = Date.now() - bqStart;
     logPerf(
       {
+        request_id: requestId,
         flow: "expense_delete",
+        option: "DELETE",
+        chat_id: chatId,
         local_parse_ms: 0,
         llm_ms: 0,
         bq_ms: bqMs,
         total_ms: bqMs,
         llm_provider: null,
         cache_hit: { card_rules: null, llm: false },
-        ok: false,
-        err_short: shortError(e)
+        status: "error",
+        error: shortError(e)
       },
       "warn"
     );
