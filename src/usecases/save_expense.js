@@ -82,9 +82,11 @@ export async function saveExpense({
 }) {
   const perf = draft.__perf || {};
   const parseMs = Number(perf.parse_ms || 0);
+  const requestId = perf.request_id || null;
   const bqStart = Date.now();
   const preferredProvider = String(llmProviderEnv || "local");
   const cacheHitCardRules = perf.cache_hit?.card_rules ?? null;
+  const baseOption = draft.is_msi ? "SAVE_MSI" : "SAVE_NORMAL";
 
   try {
     const idempotencyKey = buildIdempotencyKey({ chatId, draft });
@@ -95,13 +97,17 @@ export async function saveExpense({
         : "";
       await sendMessage(chatId, `✅ Ya estaba guardado.${idText}`);
       logPerf({
+        request_id: requestId,
         flow: draft.is_msi ? "msi" : "normal",
+        option: "SAVE_IDEMPOTENT",
+        chat_id: chatId,
         local_parse_ms: parseMs,
         llm_ms: 0,
         bq_ms: 0,
         total_ms: parseMs,
         llm_provider: preferredProvider,
-        cache_hit: { card_rules: cacheHitCardRules, llm: false }
+        cache_hit: { card_rules: cacheHitCardRules, llm: false },
+        status: "ok"
       });
       return { ok: true, expenseId: cached?.expenseId || null, alreadySaved: true };
     }
@@ -159,7 +165,10 @@ export async function saveExpense({
         const bqMs = bqInsertMs + bqUpdateMs;
         const totalMs = parseMs + llmMs + bqMs;
         logPerf({
+          request_id: requestId,
           flow,
+          option: baseOption,
+          chat_id: chatId,
           local_parse_ms: parseMs,
           llm_ms: llmMs,
           bq_ms: bqMs,
@@ -167,7 +176,8 @@ export async function saveExpense({
           llm_provider: llmProvider,
           cache_hit: { card_rules: cacheHitCardRules, llm: llmCacheHit },
           used_fallback: usedFallback,
-          enrichment_update_ok: updateResult.ok
+          enrichment_update_ok: updateResult.ok,
+          status: "ok"
         });
       } catch (error) {
         llmMs = Date.now() - llmStart;
@@ -175,7 +185,10 @@ export async function saveExpense({
         const totalMs = parseMs + llmMs + bqMs;
         logPerf(
           {
+            request_id: requestId,
             flow,
+            option: baseOption,
+            chat_id: chatId,
             local_parse_ms: parseMs,
             llm_ms: llmMs,
             bq_ms: bqMs,
@@ -183,7 +196,9 @@ export async function saveExpense({
             llm_provider: llmProvider,
             cache_hit: { card_rules: cacheHitCardRules, llm: false },
             used_fallback: usedFallback,
-            err_short: shortError(error)
+            err_short: shortError(error),
+            status: "error",
+            error: shortError(error)
           },
           "warn"
         );
@@ -202,7 +217,10 @@ export async function saveExpense({
     const flow = draft?.is_msi ? "msi" : "normal";
     logPerf(
       {
+        request_id: requestId,
         flow,
+        option: baseOption,
+        chat_id: chatId,
         local_parse_ms: parseMs,
         llm_ms: 0,
         bq_ms: bqInsertMs,
@@ -210,7 +228,9 @@ export async function saveExpense({
         llm_provider: preferredProvider,
         cache_hit: { card_rules: cacheHitCardRules, llm: false },
         used_fallback: false,
-        err_short: shortError(e)
+        err_short: shortError(e),
+        status: "error",
+        error: shortError(e)
       },
       "warn"
     );

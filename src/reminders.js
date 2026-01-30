@@ -69,7 +69,7 @@ function logPerf(payload, level = "log") {
 }
 
 // ✅ CAMBIO 1: acepta { force }
-export async function runDailyCardReminders({ force = false } = {}) {
+export async function runDailyCardReminders({ force = false, requestId = null } = {}) {
   const startMs = Date.now();
   let bqMs = 0;
   const todayISO = todayISOInTZ(); // CDMX
@@ -135,14 +135,18 @@ export async function runDailyCardReminders({ force = false } = {}) {
 
   const totalMs = Date.now() - startMs;
   logPerf({
+    request_id: requestId,
     flow: "reminder",
+    option: "RUN",
+    chat_id: null,
     local_parse_ms: 0,
     llm_ms: 0,
     bq_ms: bqMs,
     total_ms: totalMs,
     llm_provider: null,
-    cache_hit: { card_rules: null, llm: false }
+    cache_hit: { card_rules: null, llm: false },
+    status: "ok"
   });
 
-  return { ok: true, todayISO, processed: rules.length };
+  return { ok: true, todayISO, processed: rules.length, bqMs };
 }

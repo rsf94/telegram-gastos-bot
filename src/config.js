@@ -43,3 +43,30 @@ export function warnMissingEnv() {
     console.warn("Missing env var: DEEPSEEK_API_KEY (DeepSeek fallback unavailable)");
   }
 }
+
+export function validateEnv() {
+  const missing = [];
+
+  if (!TELEGRAM_BOT_TOKEN) missing.push("TELEGRAM_BOT_TOKEN");
+  if (!process.env.CRON_TOKEN) missing.push("CRON_TOKEN");
+  if (!BQ_PROJECT_ID) missing.push("BQ_PROJECT_ID");
+  if (!BQ_DATASET) missing.push("BQ_DATASET");
+  if (!BQ_TABLE) missing.push("BQ_TABLE");
+
+  if (LLM_PROVIDER === "gemini" && !GEMINI_API_KEY) {
+    missing.push("GEMINI_API_KEY (required for LLM_PROVIDER=gemini)");
+  }
+  if (LLM_PROVIDER === "deepseek" && !DEEPSEEK_API_KEY) {
+    missing.push("DEEPSEEK_API_KEY (required for LLM_PROVIDER=deepseek)");
+  }
+  if (LLM_PROVIDER === "gemini" && LLM_FALLBACK === "deepseek" && !DEEPSEEK_API_KEY) {
+    missing.push("DEEPSEEK_API_KEY (required for LLM_FALLBACK=deepseek)");
+  }
+
+  if (missing.length) {
+    throw new Error(
+      `Missing required env vars: ${missing.join(", ")}. ` +
+        "Set them before starting the server."
+    );
+  }
+}
