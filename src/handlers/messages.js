@@ -1,3 +1,5 @@
+import crypto from "crypto";
+
 import { ALLOWED_PAYMENT_METHODS } from "../config.js";
 import {
   tgSend,
@@ -142,6 +144,47 @@ function logPerf(payload, level = "log") {
   }
 }
 
+function base64UrlEncode(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/=+$/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function signLinkToken(payload, secret) {
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = base64UrlEncode(JSON.stringify(payload));
+  const unsigned = `${header}.${body}`;
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(unsigned)
+    .digest("base64")
+    .replace(/=+$/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  return `${unsigned}.${signature}`;
+}
+
+function matchesCommand(text, command) {
+  const trimmed = String(text || "").trim().toLowerCase();
+  const pattern = new RegExp(`^/${command}(?:@\\S*)?$`, "i");
+  return pattern.test(trimmed);
+}
+
+function normalizeBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/g, "");
+}
+
+function monthOffset(baseDate, delta) {
+  const year = baseDate.getUTCFullYear();
+  const month = baseDate.getUTCMonth() + delta;
+  const date = new Date(Date.UTC(year, month, 1));
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${yyyy}-${mm}`;
+}
+
 export function createMessageHandler({
   sendMessage = tgSend,
   deleteConfirmKeyboardFn = deleteConfirmKeyboard,
@@ -202,6 +245,60 @@ export function createMessageHandler({
         option = "command:cancel";
         clearAll(chatId);
         await sendMessage(chatId, "🧹 <b>Cancelado</b>.");
+        return;
+      }
+
+      if (matchesCommand(text, "link")) {
+        option = "command:link";
+        const baseUrl = normalizeBaseUrl(process.env.DASHBOARD_BASE_URL);
+        const secret = process.env.LINK_TOKEN_SECRET;
+        if (!baseUrl || !secret) {
+          await sendMessage(
+            chatId,
+            "⚠️ No está configurado el dashboard/linking (faltan variables de entorno)."
+          );
+          return;
+        }
+        const nowSec = Math.floor(Date.now() / 1000);
+        const payload = {
+          chat_id: chatId,
+          iat: nowSec,
+          exp: nowSec + 10 * 60,
+          nonce: crypto.randomUUID()
+        };
+        const token = signLinkToken(payload, secret);
+        const linkUrl = `${baseUrl}/link?token=${token}`;
+        await sendMessage(
+          chatId,
+          "🔗 Para vincular tu cuenta, abre este enlace (expira en 10 min):\n" +
+            `${linkUrl}\n\n` +
+            "Después podrás abrir tu dashboard sin pasar chat_id manualmente."
+        );
+        return;
+      }
+
+      if (matchesCommand(text, "dashboard")) {
+        option = "command:dashboard";
+        const baseUrl = normalizeBaseUrl(process.env.DASHBOARD_BASE_URL);
+        if (!baseUrl) {
+          await sendMessage(
+            chatId,
+            "⚠️ No está configurado el dashboard/linking (faltan variables de entorno)."
+          );
+          return;
+        }
+
+        const now = new Date();
+        const from = monthOffset(now, -6);
+        const to = monthOffset(now, 6);
+        const cleanUrl = `${baseUrl}/dashboard`;
+        const fallbackUrl =
+          `${baseUrl}/dashboard?chat_id=${encodeURIComponent(chatId)}` +
+          `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+        await sendMessage(
+          chatId,
+          `📊 Abre tu dashboard:\n${cleanUrl}\n\nSi necesitas depurar:\n${fallbackUrl}`
+        );
         return;
       }
 
