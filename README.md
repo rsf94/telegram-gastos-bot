@@ -45,6 +45,24 @@ El bot mostrará un preview y pedirá confirmación.
 - `ayuda` o `/help` → ejemplos y métodos válidos
 - `cancelar` o `/cancel` → limpia el borrador
 - `/analisis` → menú de análisis
+- `/cuentas` → lista cuentas de débito/efectivo (crea “Efectivo” si no existe)
+- `/alta_cuenta Nombre | Institución | Tipo` → registra cuenta (tipo: `DEBIT` o `CASH`)
+- `/mov ...` → registra movimientos de efectivo/débito (retiro, depósito, transfer)
+
+#### Ledger (efectivo / débito)
+
+1) Crear cuentas:
+
+- ` /alta_cuenta Nómina BBVA | BBVA | DEBIT`
+- ` /alta_cuenta Caja Chica | Cash | CASH`
+
+> Instituciones permitidas (DEBIT): BBVA, Banorte, Santander.
+
+2) Movimientos:
+
+- Retiro: `/mov retiro 2000 bbva`
+- Depósito: `/mov deposito 25000 bbva nomina`
+- Transfer: `/mov transfer 5000 bbva -> banorte`
 
 ---
 
@@ -147,6 +165,8 @@ Tablas auxiliares:
 - `card_rules` → reglas de corte/pago por tarjeta (para análisis y recordatorios)
 - `reminder_log` → evita duplicar recordatorios
 - `enrichment_retry` → reintentos de enriquecimiento si falla LLM
+- `accounts` → catálogo de cuentas débito/efectivo (ver `docs/diagnostics/create_accounts.sql`)
+- `ledger_movements` → movimientos de efectivo (ver `docs/diagnostics/create_ledger_movements.sql`)
 
 ---
 
