@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 
 import { createMessageHandler } from "../src/handlers/messages.js";
 import { createCallbackHandler } from "../src/handlers/callbacks.js";
@@ -20,6 +21,41 @@ import {
   getCardRule,
   getActiveCardNames
 } from "../src/cache/card_rules_cache.js";
+
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+function withEnv(vars, fn) {
+  const prev = {};
+  for (const [key, value] of Object.entries(vars)) {
+    prev[key] = Object.prototype.hasOwnProperty.call(process.env, key)
+      ? process.env[key]
+      : undefined;
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  const restore = () => {
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  };
+  const result = fn();
+  if (result && typeof result.finally === "function") {
+    return result.finally(restore);
+  }
+  restore();
+  return result;
+}
 
 function createMessageSpy() {
   const messages = [];
@@ -78,6 +114,89 @@ test("ayuda returns help copy", async () => {
   assert.equal(messages.at(-1).text, helpText());
   assert.ok(messages.at(-1).text.includes("/analisis"));
   assert.ok(messages.at(-1).text.includes("/borrar"));
+});
+
+test("/link returns link URL and signed token", async () => {
+  await withEnv(
+    { DASHBOARD_BASE_URL: "https://corte-web.example", LINK_TOKEN_SECRET: "secret" },
+    async () => {
+      __resetState();
+      const { sendMessage, messages } = createMessageSpy();
+      const handler = createMessageHandler({ sendMessage });
+
+      await handler({ chat: { id: 99 }, text: "/link" });
+
+      const reply = messages.at(-1).text;
+      assert.ok(reply.includes("/link?token="));
+      assert.ok(!reply.includes(welcomeText()));
+    }
+  );
+});
+
+test("/link token verifies and includes payload", async () => {
+  await withEnv(
+    { DASHBOARD_BASE_URL: "https://corte-web.example", LINK_TOKEN_SECRET: "secret2" },
+    async () => {
+      __resetState();
+      const { sendMessage, messages } = createMessageSpy();
+      const handler = createMessageHandler({ sendMessage });
+
+      await handler({ chat: { id: 42 }, text: "/link@" });
+
+      const reply = messages.at(-1).text;
+      const tokenMatch = reply.match(/token=([A-Za-z0-9._-]+)/);
+      assert.ok(tokenMatch);
+      const token = tokenMatch[1];
+      const [header, payload, signature] = token.split(".");
+      assert.ok(header && payload && signature);
+
+      const unsigned = `${header}.${payload}`;
+      const expectedSignature = crypto
+        .createHmac("sha256", "secret2")
+        .update(unsigned)
+        .digest("base64")
+        .replace(/=+$/g, "")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_");
+      assert.equal(signature, expectedSignature);
+
+      const payloadJson = JSON.parse(base64UrlDecode(payload));
+      assert.equal(payloadJson.chat_id, "42");
+      assert.ok(payloadJson.iat);
+      assert.ok(payloadJson.exp);
+      assert.ok(payloadJson.nonce);
+      assert.equal(payloadJson.exp - payloadJson.iat, 10 * 60);
+    }
+  );
+});
+
+test("/dashboard returns dashboard URL", async () => {
+  await withEnv({ DASHBOARD_BASE_URL: "https://corte-web.example" }, async () => {
+    __resetState();
+    const { sendMessage, messages } = createMessageSpy();
+    const handler = createMessageHandler({ sendMessage });
+
+    await handler({ chat: { id: 77 }, text: "/dashboard" });
+
+    const reply = messages.at(-1).text;
+    assert.ok(reply.includes("/dashboard"));
+    assert.ok(!reply.includes(welcomeText()));
+  });
+});
+
+test("/dashboard warns when env vars are missing", async () => {
+  await withEnv({ DASHBOARD_BASE_URL: undefined }, async () => {
+    __resetState();
+    const { sendMessage, messages } = createMessageSpy();
+    const handler = createMessageHandler({ sendMessage });
+
+    await handler({ chat: { id: 78 }, text: "/dashboard@" });
+
+    assert.equal(
+      messages.at(-1).text,
+      "⚠️ No está configurado el dashboard/linking (faltan variables de entorno)."
+    );
+  });
 });
 
 test("msi step1 asks for payment method even without months", async () => {
