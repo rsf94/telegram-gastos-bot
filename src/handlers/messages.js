@@ -24,16 +24,31 @@ import {
   clearAll,
   getPendingDelete,
   setPendingDelete,
-  setLastExpenseId
+  setLastExpenseId,
+  setLedgerDraft
 } from "../state.js";
 import {
   getExpenseById,
   countInstallmentsForExpense,
   getActiveCardNames,
-  getBillingMonthForPurchase
+  getBillingMonthForPurchase,
+  listAccounts,
+  createAccount
 } from "../storage/bigquery.js";
 import { saveExpense } from "../usecases/save_expense.js";
 import { helpText, welcomeText } from "../ui/copy.js";
+import {
+  allowedInstitutionsList,
+  accountLabel,
+  buildAccountSelectKeyboard,
+  buildConfirmKeyboard,
+  formatAccountsList,
+  formatMovementPreview,
+  getDefaultCashAccount,
+  matchAccountsByQuery,
+  parseAccountCommand,
+  parseMovementCommand
+} from "../ledger.js";
 
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -137,6 +152,8 @@ export function createMessageHandler({
   countInstallmentsForExpenseFn = countInstallmentsForExpense,
   getActiveCardNamesFn = getActiveCardNames,
   getBillingMonthForPurchaseFn = getBillingMonthForPurchase,
+  listAccountsFn = listAccounts,
+  createAccountFn = createAccount,
   handleAnalysisCommand
 } = {}) {
   return async function handleMessage(msg, { requestId } = {}) {
@@ -150,6 +167,17 @@ export function createMessageHandler({
     const text = (msg.text || "").trim();
 
     const low = text.toLowerCase();
+    const logLedgerPerf = (payload, level = "log") => {
+      logPerf(
+        {
+          request_id: requestId || null,
+          flow: "ledger",
+          chat_id: chatId,
+          ...payload
+        },
+        level
+      );
+    };
 
     try {
       if (!text) {
@@ -174,6 +202,283 @@ export function createMessageHandler({
         option = "command:cancel";
         clearAll(chatId);
         await sendMessage(chatId, "🧹 <b>Cancelado</b>.");
+        return;
+      }
+
+      if (low.startsWith("/cuentas")) {
+        option = "command:cuentas";
+        const ledgerStart = Date.now();
+        let bqMs = 0;
+        try {
+          const listStart = Date.now();
+          let accounts = await listAccountsFn({ chatId, activeOnly: true });
+          bqMs += Date.now() - listStart;
+
+          if (!accounts.some((acc) => acc.account_type === "CASH")) {
+            const createStart = Date.now();
+            await createAccountFn({
+              chatId,
+              accountName: "Efectivo",
+              institution: "Cash",
+              accountType: "CASH",
+              currency: "MXN"
+            });
+            bqMs += Date.now() - createStart;
+            const refreshStart = Date.now();
+            accounts = await listAccountsFn({ chatId, activeOnly: true });
+            bqMs += Date.now() - refreshStart;
+          }
+
+          await sendMessage(chatId, formatAccountsList(accounts));
+          logLedgerPerf({
+            subtype: "list_accounts",
+            bq_ms: bqMs,
+            total_ms: Date.now() - ledgerStart,
+            status: "ok"
+          });
+        } catch (err) {
+          logLedgerPerf(
+            {
+              subtype: "list_accounts",
+              bq_ms: bqMs,
+              total_ms: Date.now() - ledgerStart,
+              status: "error",
+              error: shortError(err)
+            },
+            "warn"
+          );
+          throw err;
+        }
+        return;
+      }
+
+      if (low.startsWith("/alta_cuenta")) {
+        option = "command:alta_cuenta";
+        const ledgerStart = Date.now();
+        let bqMs = 0;
+        const parsed = parseAccountCommand(text);
+        if (!parsed.ok) {
+          const institutions = allowedInstitutionsList().join(", ");
+          await sendMessage(
+            chatId,
+            "Formato: <code>/alta_cuenta Nombre | Institución | Tipo</code>\n" +
+              `Ejemplo: <code>/alta_cuenta Nómina BBVA | BBVA | DEBIT</code>\n` +
+              `Instituciones permitidas (DEBIT): ${escapeHtml(institutions)}`
+          );
+          logLedgerPerf({
+            subtype: "create_account_invalid",
+            bq_ms: 0,
+            total_ms: Date.now() - ledgerStart,
+            status: "ok"
+          });
+          return;
+        }
+
+        try {
+          const insertStart = Date.now();
+          const created = await createAccountFn({
+            chatId,
+            accountName: parsed.accountName,
+            institution: parsed.institution,
+            accountType: parsed.accountType,
+            currency: parsed.currency
+          });
+          bqMs += Date.now() - insertStart;
+          await sendMessage(
+            chatId,
+            `✅ Cuenta creada. ID: <code>${escapeHtml(created.account_id)}</code>`
+          );
+          logLedgerPerf({
+            subtype: "create_account",
+            bq_ms: bqMs,
+            total_ms: Date.now() - ledgerStart,
+            status: "ok"
+          });
+        } catch (err) {
+          logLedgerPerf(
+            {
+              subtype: "create_account",
+              bq_ms: bqMs,
+              total_ms: Date.now() - ledgerStart,
+              status: "error",
+              error: shortError(err)
+            },
+            "warn"
+          );
+          throw err;
+        }
+        return;
+      }
+
+      if (low.startsWith("/mov")) {
+        option = "command:mov";
+        const ledgerStart = Date.now();
+        let bqMs = 0;
+        const parsed = parseMovementCommand(text);
+        if (!parsed.ok) {
+          await sendMessage(
+            chatId,
+            "Formato: <code>/mov retiro 2000 bbva</code>\n" +
+              "<code>/mov deposito 2500 bbva nomina</code>\n" +
+              "<code>/mov transfer 5000 bbva -> banorte</code>"
+          );
+          logLedgerPerf({
+            subtype: "movement_invalid",
+            bq_ms: 0,
+            total_ms: Date.now() - ledgerStart,
+            status: "ok"
+          });
+          return;
+        }
+
+        const listStart = Date.now();
+        let accounts = await listAccountsFn({ chatId, activeOnly: true });
+        bqMs += Date.now() - listStart;
+        if (!accounts.some((acc) => acc.account_type === "CASH")) {
+          const createStart = Date.now();
+          await createAccountFn({
+            chatId,
+            accountName: "Efectivo",
+            institution: "Cash",
+            accountType: "CASH",
+            currency: "MXN"
+          });
+          bqMs += Date.now() - createStart;
+          const refreshStart = Date.now();
+          accounts = await listAccountsFn({ chatId, activeOnly: true });
+          bqMs += Date.now() - refreshStart;
+        }
+
+        const movementDate = new Date().toISOString().slice(0, 10);
+        const draft = {
+          movement_type: parsed.type,
+          movement_date: movementDate,
+          amount_mxn: parsed.amount,
+          from_account_id: null,
+          to_account_id: null,
+          from_account_label: null,
+          to_account_label: null,
+          merchant: null,
+          notes: null,
+          raw_text: parsed.rawText,
+          source: "telegram"
+        };
+
+        const buildOptions = (matches) =>
+          matches.map((acc) => ({
+            account_id: acc.account_id,
+            label: accountLabel(acc)
+          }));
+
+        if (parsed.type === "WITHDRAWAL") {
+          const matches = parsed.accountQuery
+            ? matchAccountsByQuery(parsed.accountQuery, accounts, ["DEBIT"])
+            : accounts.filter((acc) => acc.account_type === "DEBIT");
+
+          if (matches.length === 1) {
+            draft.from_account_id = matches[0].account_id;
+            draft.from_account_label = accountLabel(matches[0]);
+          } else if (matches.length > 1) {
+            draft.__pending = { field: "from", options: buildOptions(matches) };
+          } else {
+            await sendMessage(chatId, "No encontré una cuenta débito activa.");
+            logLedgerPerf({
+              subtype: "movement_missing_account",
+              bq_ms: bqMs,
+              total_ms: Date.now() - ledgerStart,
+              status: "ok"
+            });
+            return;
+          }
+
+          const cashAccount = getDefaultCashAccount(accounts);
+          if (cashAccount) {
+            draft.to_account_id = cashAccount.account_id;
+            draft.to_account_label = accountLabel(cashAccount);
+          }
+        }
+
+        if (parsed.type === "DEPOSIT") {
+          const matches = parsed.accountQuery
+            ? matchAccountsByQuery(parsed.accountQuery, accounts)
+            : accounts;
+          if (matches.length === 1) {
+            draft.to_account_id = matches[0].account_id;
+            draft.to_account_label = accountLabel(matches[0]);
+          } else if (matches.length > 1) {
+            draft.__pending = { field: "to", options: buildOptions(matches) };
+          } else {
+            await sendMessage(chatId, "No encontré la cuenta de destino.");
+            logLedgerPerf({
+              subtype: "movement_missing_account",
+              bq_ms: bqMs,
+              total_ms: Date.now() - ledgerStart,
+              status: "ok"
+            });
+            return;
+          }
+        }
+
+        if (parsed.type === "TRANSFER") {
+          const fromMatches = matchAccountsByQuery(parsed.fromQuery, accounts);
+          const toMatches = matchAccountsByQuery(parsed.toQuery, accounts);
+
+          if (!fromMatches.length || !toMatches.length) {
+            await sendMessage(chatId, "No encontré las cuentas de origen/destino.");
+            logLedgerPerf({
+              subtype: "movement_missing_account",
+              bq_ms: bqMs,
+              total_ms: Date.now() - ledgerStart,
+              status: "ok"
+            });
+            return;
+          }
+
+          if (fromMatches.length === 1) {
+            draft.from_account_id = fromMatches[0].account_id;
+            draft.from_account_label = accountLabel(fromMatches[0]);
+          } else {
+            draft.__pending = { field: "from", options: buildOptions(fromMatches) };
+          }
+
+          if (toMatches.length === 1) {
+            draft.to_account_id = toMatches[0].account_id;
+            draft.to_account_label = accountLabel(toMatches[0]);
+          } else if (draft.__pending) {
+            draft.__pending_next = { field: "to", options: buildOptions(toMatches) };
+          } else {
+            draft.__pending = { field: "to", options: buildOptions(toMatches) };
+          }
+        }
+
+        if (draft.__pending) {
+          setLedgerDraft(chatId, draft);
+          const fieldLabel = draft.__pending.field === "from" ? "origen" : "destino";
+          await sendMessage(chatId, `Selecciona la cuenta de ${fieldLabel}:`, {
+            reply_markup: buildAccountSelectKeyboard(
+              draft.__pending.options,
+              draft.__pending.field
+            )
+          });
+          logLedgerPerf({
+            subtype: "movement_select_account",
+            bq_ms: bqMs,
+            total_ms: Date.now() - ledgerStart,
+            status: "ok"
+          });
+          return;
+        }
+
+        setLedgerDraft(chatId, draft);
+        await sendMessage(chatId, formatMovementPreview(draft), {
+          reply_markup: buildConfirmKeyboard()
+        });
+        logLedgerPerf({
+          subtype: "movement_preview",
+          bq_ms: bqMs,
+          total_ms: Date.now() - ledgerStart,
+          status: "ok"
+        });
         return;
       }
 

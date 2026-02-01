@@ -12,12 +12,25 @@ import {
   clearDraft,
   getPendingDelete,
   clearPendingDelete,
-  setLastExpenseId
+  setLastExpenseId,
+  getLedgerDraft,
+  setLedgerDraft,
+  clearLedgerDraft
 } from "../state.js";
 import { saveExpense } from "../usecases/save_expense.js";
 import { deleteExpense } from "../usecases/delete_expense.js";
-import { getActiveCardNames, getBillingMonthForPurchase } from "../storage/bigquery.js";
+import {
+  getActiveCardNames,
+  getBillingMonthForPurchase,
+  insertLedgerMovement
+} from "../storage/bigquery.js";
 import { ALLOWED_PAYMENT_METHODS } from "../config.js";
+import {
+  buildAccountSelectKeyboard,
+  buildConfirmKeyboard,
+  formatMovementPreview,
+  validateMovementDraft
+} from "../ledger.js";
 
 function shortError(error) {
   const msg = error?.message || String(error || "");
@@ -43,6 +56,7 @@ export function createCallbackHandler({
   editMenuKeyboardFn = editMenuKeyboard,
   getActiveCardNamesFn = getActiveCardNames,
   getBillingMonthForPurchaseFn = getBillingMonthForPurchase,
+  insertLedgerMovementFn = insertLedgerMovement,
   handleAnalysisCallback
 } = {}) {
   return async function handleCallback(cb, { requestId } = {}) {
@@ -54,12 +68,150 @@ export function createCallbackHandler({
 
     const chatId = String(cb.message.chat.id);
     const data = cb.data;
+    const logLedgerPerf = (payload, level = "log") => {
+      logPerf(
+        {
+          request_id: requestId || null,
+          flow: "ledger",
+          chat_id: chatId,
+          ...payload
+        },
+        level
+      );
+    };
 
     try {
       if (data?.startsWith("ANALYSIS:") && typeof handleAnalysisCallback === "function") {
         option = "analysis_callback";
         const handled = await handleAnalysisCallback(cb, { requestId });
         if (handled) return;
+      }
+
+      if (data === "ledger_cancel") {
+        option = "ledger_cancel";
+        clearLedgerDraft(chatId);
+        await sendMessage(chatId, "🧹 <b>Movimiento cancelado</b>.");
+        await answerCallback(cb.id);
+        logLedgerPerf({
+          subtype: "movement_cancel",
+          bq_ms: 0,
+          total_ms: Date.now() - startedAt,
+          status: "ok"
+        });
+        return;
+      }
+
+      if (data === "ledger_confirm") {
+        option = "ledger_confirm";
+        const ledgerDraft = getLedgerDraft(chatId);
+        if (!ledgerDraft) {
+          await sendMessage(chatId, "No tengo un movimiento pendiente.");
+          await answerCallback(cb.id);
+          return;
+        }
+
+        const validationError = validateMovementDraft(ledgerDraft);
+        if (validationError) {
+          await sendMessage(chatId, validationError);
+          await answerCallback(cb.id);
+          return;
+        }
+
+        const bqStart = Date.now();
+        try {
+          const movementId = await insertLedgerMovementFn(ledgerDraft, chatId);
+          const bqMs = Date.now() - bqStart;
+          clearLedgerDraft(chatId);
+          await sendMessage(
+            chatId,
+            `✅ Movimiento guardado. ID: <code>${movementId}</code>`
+          );
+          await answerCallback(cb.id);
+          logLedgerPerf({
+            subtype: "movement_confirm",
+            bq_ms: bqMs,
+            total_ms: Date.now() - startedAt,
+            status: "ok"
+          });
+          return;
+        } catch (error) {
+          const bqMs = Date.now() - bqStart;
+          logLedgerPerf(
+            {
+              subtype: "movement_confirm",
+              bq_ms: bqMs,
+              total_ms: Date.now() - startedAt,
+              status: "error",
+              error: shortError(error)
+            },
+            "warn"
+          );
+          throw error;
+        }
+      }
+
+      if (data?.startsWith("ledger_select|")) {
+        option = "ledger_select";
+        const ledgerDraft = getLedgerDraft(chatId);
+        if (!ledgerDraft?.__pending) {
+          await sendMessage(chatId, "No tengo selección pendiente.");
+          await answerCallback(cb.id);
+          return;
+        }
+
+        const [, field, accountId] = data.split("|");
+        const pending = ledgerDraft.__pending;
+        const selected = pending.options?.find(
+          (optionItem) => optionItem.account_id === accountId
+        );
+        if (!selected) {
+          await sendMessage(chatId, "Selección inválida.");
+          await answerCallback(cb.id);
+          return;
+        }
+
+        if (field === "from") {
+          ledgerDraft.from_account_id = selected.account_id;
+          ledgerDraft.from_account_label = selected.label;
+        } else {
+          ledgerDraft.to_account_id = selected.account_id;
+          ledgerDraft.to_account_label = selected.label;
+        }
+
+        if (ledgerDraft.__pending_next) {
+          ledgerDraft.__pending = ledgerDraft.__pending_next;
+          ledgerDraft.__pending_next = null;
+          setLedgerDraft(chatId, ledgerDraft);
+          const fieldLabel = ledgerDraft.__pending.field === "from" ? "origen" : "destino";
+          await sendMessage(chatId, `Selecciona la cuenta de ${fieldLabel}:`, {
+            reply_markup: buildAccountSelectKeyboard(
+              ledgerDraft.__pending.options,
+              ledgerDraft.__pending.field
+            )
+          });
+          await answerCallback(cb.id);
+          logLedgerPerf({
+            subtype: "movement_select_account",
+            bq_ms: 0,
+            total_ms: Date.now() - startedAt,
+            status: "ok"
+          });
+          return;
+        }
+
+        ledgerDraft.__pending = null;
+        setLedgerDraft(chatId, ledgerDraft);
+        await sendMessage(chatId, formatMovementPreview(ledgerDraft), {
+          reply_markup: buildConfirmKeyboard()
+        });
+        await answerCallback(cb.id);
+        logLedgerPerf({
+          subtype: "movement_preview",
+          bq_ms: 0,
+          total_ms: Date.now() - startedAt,
+          status: "ok"
+        });
+        return;
       }
 
       // 🗑️ Confirmar borrado

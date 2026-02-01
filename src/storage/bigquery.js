@@ -1158,3 +1158,92 @@ export async function deleteExpenseCascade({ chatId, expenseId }) {
     deletedExpense: Number(rows?.[0]?.deleted_expense || 0)
   };
 }
+
+/* =======================
+ * Ledger: accounts
+ * ======================= */
+export async function listAccounts({ chatId, activeOnly = true }) {
+  const query = `
+    SELECT
+      account_id,
+      chat_id,
+      account_name,
+      institution,
+      account_type,
+      currency,
+      active,
+      tags,
+      notes,
+      created_at,
+      updated_at
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.accounts\`
+    WHERE chat_id = @chat_id
+      ${activeOnly ? "AND active = TRUE" : ""}
+    ORDER BY created_at ASC
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
+export async function createAccount({
+  chatId,
+  accountName,
+  institution,
+  accountType,
+  currency = "MXN",
+  tags = null,
+  notes = null
+}) {
+  const table = bq.dataset(BQ_DATASET).table("accounts");
+  const now = new Date().toISOString();
+  const row = {
+    account_id: crypto.randomUUID(),
+    chat_id: String(chatId),
+    account_name: accountName,
+    institution: institution || null,
+    account_type: accountType,
+    currency: currency || "MXN",
+    active: true,
+    tags,
+    notes,
+    created_at: now,
+    updated_at: now
+  };
+
+  await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
+  return row;
+}
+
+/* =======================
+ * Ledger: movements
+ * ======================= */
+export async function insertLedgerMovement(draft, chatId) {
+  const table = bq.dataset(BQ_DATASET).table("ledger_movements");
+  const row = {
+    movement_id: crypto.randomUUID(),
+    chat_id: String(chatId),
+    movement_date: draft.movement_date,
+    amount_mxn: money2(draft.amount_mxn),
+    type: draft.movement_type,
+    from_account_id: draft.from_account_id || null,
+    to_account_id: draft.to_account_id || null,
+    merchant: draft.merchant || null,
+    notes: draft.notes || null,
+    raw_text: draft.raw_text || null,
+    source: draft.source || "telegram",
+    created_at: new Date().toISOString()
+  };
+
+  await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
+  return row.movement_id;
+}
