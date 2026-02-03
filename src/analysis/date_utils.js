@@ -40,6 +40,12 @@ export function rollWeekendToMonday(iso) {
   return iso;
 }
 
+export function weekdayShortEs(iso) {
+  const wd = dateAtNoonUTC(iso).getUTCDay();
+  const labels = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+  return labels[wd] || "";
+}
+
 export function ymFromISO(iso) {
   const d = dateAtNoonUTC(iso);
   return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1 };
