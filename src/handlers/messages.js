@@ -17,7 +17,8 @@ import {
   guessCategory,
   guessMerchant,
   cleanTextForDescription,
-  paymentMethodPreview
+  paymentMethodPreview,
+  todayISOInTZ
 } from "../parsing.js";
 import {
   getDraft,
@@ -37,8 +38,10 @@ import {
   listAccounts,
   createAccount
 } from "../storage/bigquery.js";
+import { getActiveCardRules } from "../cache/card_rules_cache.js";
 import { saveExpense } from "../usecases/save_expense.js";
 import { helpText, welcomeText } from "../ui/copy.js";
+import { buildUpcomingPaymentsReport } from "../payments.js";
 import {
   allowedInstitutionsList,
   accountLabel,
@@ -194,6 +197,7 @@ export function createMessageHandler({
   getExpenseByIdFn = getExpenseById,
   countInstallmentsForExpenseFn = countInstallmentsForExpense,
   getActiveCardNamesFn = getActiveCardNames,
+  getActiveCardRulesFn = getActiveCardRules,
   getBillingMonthForPurchaseFn = getBillingMonthForPurchase,
   listAccountsFn = listAccounts,
   createAccountFn = createAccount,
@@ -595,6 +599,18 @@ export function createMessageHandler({
           await handleAnalysisCommand({ chatId, requestId });
           return;
         }
+      }
+
+      if (matchesCommand(text, "pagos") || matchesCommand(text, "payment_dates")) {
+        option = "command:pagos";
+        const rules = await getActiveCardRulesFn(chatId);
+        const report = buildUpcomingPaymentsReport({
+          todayISO: todayISOInTZ(),
+          rules,
+          escapeHtmlFn: escapeHtml
+        });
+        await sendMessage(chatId, report.text);
+        return;
       }
 
       if (low === "confirmar" || low === "/confirm") {

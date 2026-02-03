@@ -53,7 +53,8 @@ export function getNextPayDateISO({
   todayISO,
   cutDay,
   payOffsetDays,
-  rollWeekendToMonday: rollWeekend = false
+  rollWeekendToMonday: rollWeekend = false,
+  includeToday = false
 }) {
   const { y, m } = ymFromISO(todayISO);
   const current = buildCutAndPayDates({
@@ -64,7 +65,7 @@ export function getNextPayDateISO({
     rollWeekendToMonday: rollWeekend
   });
 
-  if (current.payISO > todayISO) {
+  if (includeToday ? current.payISO >= todayISO : current.payISO > todayISO) {
     return current.payISO;
   }
 
