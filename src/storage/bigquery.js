@@ -315,6 +315,50 @@ export async function getAnalysisMsiTotalsByCard({ chatId, cardNames, monthISO }
   return rows || [];
 }
 
+export async function getCardCashflowTotal({ chatId, cardName, monthISO }) {
+  const query = `
+    WITH params AS (
+      SELECT
+        DATE_TRUNC(DATE(@month), MONTH) AS month_start,
+        DATE_ADD(DATE_TRUNC(DATE(@month), MONTH), INTERVAL 1 MONTH) AS next_month
+    ),
+    no_msi AS (
+      SELECT COALESCE(SUM(amount_mxn), 0) AS total
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`, params
+      WHERE chat_id = @chat_id
+        AND payment_method = @card_name
+        AND purchase_date >= params.month_start
+        AND purchase_date < params.next_month
+        AND (is_msi IS NULL OR is_msi = FALSE)
+    ),
+    msi AS (
+      SELECT COALESCE(SUM(i.amount_mxn), 0) AS total
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.installments\` i
+      CROSS JOIN params
+      WHERE i.chat_id = @chat_id
+        AND i.card_name = @card_name
+        AND i.billing_month = params.month_start
+        AND i.status != 'PAID'
+    )
+    SELECT (no_msi.total + msi.total) AS total
+    FROM no_msi CROSS JOIN msi
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      card_name: String(cardName),
+      month: monthISO
+    },
+    parameterMode: "NAMED"
+  };
+
+  const [job] = await bq.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return Number(rows?.[0]?.total || 0);
+}
+
 export async function getAnalysisPendingMsiTotal({ chatId }) {
   const query = `
     SELECT COALESCE(SUM(amount_mxn), 0) AS total

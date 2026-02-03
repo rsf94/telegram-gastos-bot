@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "crypto";
 
 import { validateEnv, warnMissingEnv } from "./config.js";
-import { runDailyCardReminders } from "./reminders.js";
+import { runDailyCardReminders, runPaymentDateReminders } from "./reminders.js";
 import { createCallbackHandler } from "./handlers/callbacks.js";
 import { createMessageHandler } from "./handlers/messages.js";
 import { createAnalysisHandler } from "./handlers/analysis.js";
@@ -145,6 +145,67 @@ app.get("/cron/daily", async (req, res) => {
       status === "error" ? "warn" : "log"
     );
   }
+});
+
+// ===== CRON: recordatorios de pago =====
+app.get("/cron/payment-reminders", async (req, res) => {
+  const startedAt = Date.now();
+  const requestId = req.requestId;
+  let status = "ok";
+  let errorShort = null;
+  let summary = null;
+  try {
+    const token = String(req.query.token || "");
+    if (!process.env.CRON_TOKEN || token !== process.env.CRON_TOKEN) {
+      status = "error";
+      errorShort = "unauthorized";
+      return res.status(401).send("unauthorized");
+    }
+
+    const limitChats = Number(req.query.limitChats || 50);
+    summary = await runPaymentDateReminders({ limitChats, requestId });
+  } catch (e) {
+    status = "error";
+    errorShort = shortError(e);
+    console.error(e);
+    if (!summary) {
+      summary = {
+        ok: false,
+        scanned_cards: 0,
+        due_tomorrow: 0,
+        sent: 0,
+        skipped: 0,
+        bq_ms: 0,
+        total_ms: 0
+      };
+    }
+  } finally {
+    const totalMs = Date.now() - startedAt;
+    logPerf(
+      {
+        request_id: requestId,
+        flow: "cron:payment_reminders",
+        option: "RUN",
+        chat_id: null,
+        bq_ms: summary?.bq_ms || 0,
+        llm_ms: 0,
+        total_ms: totalMs,
+        status,
+        error: errorShort || undefined
+      },
+      status === "error" ? "warn" : "log"
+    );
+  }
+
+  return res.status(200).json({
+    ok: summary?.ok === true,
+    scanned_cards: summary?.scanned_cards || 0,
+    due_tomorrow: summary?.due_tomorrow || 0,
+    sent: summary?.sent || 0,
+    skipped: summary?.skipped || 0,
+    bq_ms: summary?.bq_ms || 0,
+    total_ms: summary?.total_ms || 0
+  });
 });
 
 // ===== CRON: enrichment retry =====

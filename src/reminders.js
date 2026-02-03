@@ -1,58 +1,23 @@
 import { tgSend, escapeHtml } from "./telegram.js";
 import {
   getActiveCardRules,
+  getCardCashflowTotal,
   sumExpensesForCycle,
   alreadySentReminder,
   logReminderSent
 } from "./storage/bigquery.js";
 import { todayISOInTZ } from "./parsing.js";
-
-// --- Date helpers (robustos contra TZ/DST) ---
-function dateAtNoonUTC(iso) {
-  return new Date(`${iso}T12:00:00Z`);
-}
-function isoFromDateUTC(d) {
-  return d.toISOString().slice(0, 10);
-}
-function addDaysISO(iso, days) {
-  const d = dateAtNoonUTC(iso);
-  d.setUTCDate(d.getUTCDate() + days);
-  return isoFromDateUTC(d);
-}
-function lastDayOfMonth(year, month1to12) {
-  return new Date(Date.UTC(year, month1to12, 0)).getUTCDate();
-}
-function clampDay(year, month1to12, day) {
-  return Math.min(day, lastDayOfMonth(year, month1to12));
-}
-function makeISODate(year, month1to12, day) {
-  const mm = String(month1to12).padStart(2, "0");
-  const dd = String(day).padStart(2, "0");
-  return `${year}-${mm}-${dd}`;
-}
-function weekdayUTC(iso) {
-  return dateAtNoonUTC(iso).getUTCDay(); // 0=Sun 6=Sat
-}
-function rollWeekendToMonday(iso) {
-  const wd = weekdayUTC(iso);
-  if (wd === 6) return addDaysISO(iso, 2);
-  if (wd === 0) return addDaysISO(iso, 1);
-  return iso;
-}
-
-function ymFromISO(todayISO) {
-  const d = dateAtNoonUTC(todayISO);
-  return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1 };
-}
-function prevYM(y, m) {
-  m -= 1;
-  if (m === 0) return { y: y - 1, m: 12 };
-  return { y, m };
-}
-function cutISOForYM(y, m, cut_day) {
-  const cd = clampDay(y, m, cut_day);
-  return makeISODate(y, m, cd);
-}
+import {
+  addDaysISO,
+  addMonthsISO,
+  buildCutAndPayDates,
+  cutISOForYM,
+  makeISODate,
+  prevYM,
+  rollWeekendToMonday,
+  startOfMonthISO,
+  ymFromISO
+} from "./analysis/date_utils.js";
 
 function formatMoneyMXN(n) {
   const x = Number(n || 0);
@@ -66,6 +31,69 @@ function logPerf(payload, level = "log") {
   } else {
     console.log(JSON.stringify(base));
   }
+}
+
+const paymentReminderCache = new Map();
+
+function paymentReminderKey({ chatId, cardName }) {
+  return `${chatId}|${cardName}`;
+}
+
+function wasPaymentReminderSent({ todayISO, chatId, cardName }) {
+  const key = paymentReminderKey({ chatId, cardName });
+  return paymentReminderCache.get(key) === todayISO;
+}
+
+function markPaymentReminderSent({ todayISO, chatId, cardName }) {
+  const key = paymentReminderKey({ chatId, cardName });
+  paymentReminderCache.set(key, todayISO);
+}
+
+export function getNextPayDateISO({
+  todayISO,
+  cutDay,
+  payOffsetDays,
+  rollWeekendToMonday: rollWeekend = false
+}) {
+  const { y, m } = ymFromISO(todayISO);
+  const current = buildCutAndPayDates({
+    year: y,
+    month: m,
+    cutDay,
+    payOffsetDays,
+    rollWeekendToMonday: rollWeekend
+  });
+
+  if (current.payISO > todayISO) {
+    return current.payISO;
+  }
+
+  const nextMonthISO = addMonthsISO(makeISODate(y, m, 1), 1);
+  const { y: ny, m: nm } = ymFromISO(nextMonthISO);
+  const next = buildCutAndPayDates({
+    year: ny,
+    month: nm,
+    cutDay,
+    payOffsetDays,
+    rollWeekendToMonday: rollWeekend
+  });
+  return next.payISO;
+}
+
+export function isPayDateTomorrow({
+  todayISO,
+  cutDay,
+  payOffsetDays,
+  rollWeekendToMonday: rollWeekend = false
+}) {
+  const tomorrowISO = addDaysISO(todayISO, 1);
+  const nextPayISO = getNextPayDateISO({
+    todayISO,
+    cutDay,
+    payOffsetDays,
+    rollWeekendToMonday: rollWeekend
+  });
+  return nextPayISO === tomorrowISO;
 }
 
 // ✅ CAMBIO 1: acepta { force }
@@ -149,4 +177,115 @@ export async function runDailyCardReminders({ force = false, requestId = null } 
   });
 
   return { ok: true, todayISO, processed: rules.length, bqMs };
+}
+
+export async function runPaymentDateReminders({
+  limitChats = 50,
+  todayISO = todayISOInTZ(),
+  getActiveCardRulesFn = getActiveCardRules,
+  getCardCashflowTotalFn = getCardCashflowTotal,
+  sendMessageFn = tgSend,
+  requestId = null
+} = {}) {
+  const startMs = Date.now();
+  let bqMs = 0;
+  let scannedCards = 0;
+  let dueTomorrow = 0;
+  let sent = 0;
+  let skipped = 0;
+
+  const rulesStart = Date.now();
+  const rules = await getActiveCardRulesFn();
+  bqMs += Date.now() - rulesStart;
+
+  const tomorrowISO = addDaysISO(todayISO, 1);
+  const chatLimit = Number.isFinite(Number(limitChats)) ? Number(limitChats) : 50;
+  const seenChats = new Set();
+
+  for (const rule of rules) {
+    const chatId = String(rule.chat_id);
+    if (!seenChats.has(chatId)) {
+      if (seenChats.size >= chatLimit) continue;
+      seenChats.add(chatId);
+    }
+
+    scannedCards += 1;
+
+    const nextPayISO = getNextPayDateISO({
+      todayISO,
+      cutDay: Number(rule.cut_day),
+      payOffsetDays: Number(rule.pay_offset_days || 0),
+      rollWeekendToMonday: Boolean(rule.roll_weekend_to_monday)
+    });
+
+    if (nextPayISO !== tomorrowISO) continue;
+
+    dueTomorrow += 1;
+
+    if (wasPaymentReminderSent({ todayISO, chatId, cardName: rule.card_name })) {
+      skipped += 1;
+      continue;
+    }
+
+    let total = null;
+    let cashflowMonthISO = startOfMonthISO(nextPayISO);
+    try {
+      const sumStart = Date.now();
+      total = await getCardCashflowTotalFn({
+        chatId,
+        cardName: rule.card_name,
+        monthISO: cashflowMonthISO
+      });
+      bqMs += Date.now() - sumStart;
+    } catch (e) {
+      console.error(
+        `payment reminder: failed cashflow total for ${chatId} ${rule.card_name}`,
+        e
+      );
+      total = null;
+      cashflowMonthISO = null;
+    }
+
+    const monthLabel = cashflowMonthISO ? cashflowMonthISO.slice(0, 7) : null;
+    const lines = [
+      "💳 Recordatorio de pago",
+      "",
+      `Mañana es la fecha de pago de: ${escapeHtml(rule.card_name)}`
+    ];
+
+    if (total !== null) {
+      lines.push(`Total estimado: ${escapeHtml(formatMoneyMXN(total))} MXN`);
+      lines.push("");
+      lines.push(`(Estimación basada en gastos con cashflow en ${escapeHtml(monthLabel)})`);
+    }
+
+    await sendMessageFn(chatId, lines.join("\n"));
+    markPaymentReminderSent({ todayISO, chatId, cardName: rule.card_name });
+    sent += 1;
+  }
+
+  const totalMs = Date.now() - startMs;
+  logPerf({
+    request_id: requestId,
+    flow: "reminder",
+    option: "PAYMENT_REMINDER",
+    chat_id: null,
+    local_parse_ms: 0,
+    llm_ms: 0,
+    bq_ms: bqMs,
+    total_ms: totalMs,
+    llm_provider: null,
+    cache_hit: { card_rules: null, llm: false },
+    status: "ok"
+  });
+
+  return {
+    ok: true,
+    scanned_cards: scannedCards,
+    due_tomorrow: dueTomorrow,
+    sent,
+    skipped,
+    bq_ms: bqMs,
+    total_ms: totalMs
+  };
 }

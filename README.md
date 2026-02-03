@@ -181,7 +181,20 @@ La app expone:
 - `GET /` → `OK`
 - `POST /telegram-webhook` → endpoint para webhook de Telegram
 - `GET /cron/daily?token=...` → recordatorios diarios (corte/pago)
+- `GET /cron/payment-reminders?token=...` → recordatorios de pago (1 día antes, JSON)
 - `GET /cron/enrich?token=...` → reintentos de enriquecimiento LLM (devuelve JSON con summary)
+
+---
+
+## ⏰ Cloud Scheduler (recordatorios de pago)
+
+Configura un job diario en Cloud Scheduler para enviar recordatorios 1 día antes del pago:
+
+- **URL**: `https://<TU_CLOUD_RUN_URL>/cron/payment-reminders?token=<CRON_TOKEN>&limitChats=50`
+- **Método**: `GET`
+- **Horario sugerido**: 9:00am hora local (CDMX)
+- **Servicio**: mismo Cloud Run de `telegram-gastos-bot`
+- **Token**: usa el mismo `CRON_TOKEN` que ya existe (no se agrega ninguna variable nueva)
 
 ---
 
