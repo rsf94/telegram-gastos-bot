@@ -88,6 +88,23 @@ export async function insertExpenseToBQ(draft, chatId) {
   return row.id;
 }
 
+export async function insertPendingUserLink({ linkToken, chatId, expiresAt, createdAt = new Date() }) {
+  const table = bq.dataset(BQ_DATASET).table("user_links");
+  await table.insert([
+    {
+      link_token: String(linkToken),
+      chat_id: String(chatId),
+      status: "PENDING",
+      created_at: createdAt.toISOString(),
+      provider: "telegram",
+      expires_at: expiresAt.toISOString(),
+      metadata: {
+        telegram_chat_id: String(chatId)
+      }
+    }
+  ]);
+}
+
 /* =======================
  * Traer reglas activas de tarjetas
  * ======================= */

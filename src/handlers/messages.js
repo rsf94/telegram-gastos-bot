@@ -36,8 +36,10 @@ import {
   getActiveCardNames,
   getBillingMonthForPurchase,
   listAccounts,
-  createAccount
+  createAccount,
+  insertPendingUserLink
 } from "../storage/bigquery.js";
+import { createLinkToken } from "../linking.js";
 import { getActiveCardRules } from "../cache/card_rules_cache.js";
 import { saveExpense } from "../usecases/save_expense.js";
 import { helpText, welcomeText } from "../ui/copy.js";
@@ -201,6 +203,7 @@ export function createMessageHandler({
   getBillingMonthForPurchaseFn = getBillingMonthForPurchase,
   listAccountsFn = listAccounts,
   createAccountFn = createAccount,
+  insertPendingUserLinkFn = insertPendingUserLink,
   handleAnalysisCommand
 } = {}) {
   return async function handleMessage(msg, { requestId } = {}) {
@@ -284,7 +287,8 @@ export function createMessageHandler({
       if (matchesCommand(text, "dashboard")) {
         option = "command:dashboard";
         const baseUrl = normalizeBaseUrl(process.env.DASHBOARD_BASE_URL);
-        if (!baseUrl) {
+        const secret = process.env.LINK_TOKEN_SECRET;
+        if (!baseUrl || !secret) {
           await sendMessage(
             chatId,
             "⚠️ No está configurado el dashboard/linking (faltan variables de entorno)."
@@ -292,17 +296,37 @@ export function createMessageHandler({
           return;
         }
 
-        const now = new Date();
-        const from = monthOffset(now, -6);
-        const to = monthOffset(now, 6);
-        const cleanUrl = `${baseUrl}/dashboard`;
-        const fallbackUrl =
-          `${baseUrl}/dashboard?chat_id=${encodeURIComponent(chatId)}` +
-          `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
-        await sendMessage(
-          chatId,
-          `📊 Abre tu dashboard:\n${cleanUrl}\n\nSi necesitas depurar:\n${fallbackUrl}`
-        );
+        try {
+          const now = new Date();
+          const { linkToken, expiresAt } = createLinkToken({ secret, now, ttlMinutes: 15 });
+
+          await insertPendingUserLinkFn({
+            linkToken,
+            chatId,
+            expiresAt,
+            createdAt: now
+          });
+
+          const from = monthOffset(now, -6);
+          const to = monthOffset(now, 6);
+          const encodedToken = encodeURIComponent(linkToken);
+          const cleanUrl = `${baseUrl}/dashboard?link_token=${encodedToken}`;
+          const fallbackUrl =
+            `${baseUrl}/dashboard?link_token=${encodedToken}` +
+            `&chat_id=${encodeURIComponent(chatId)}` +
+            `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+
+          await sendMessage(
+            chatId,
+            `📊 Abre tu dashboard:\n${cleanUrl}\n\n(Expira en 15 min)\n\nSi necesitas depurar:\n${fallbackUrl}`
+          );
+        } catch (error) {
+          console.error("❌ Error creando link de dashboard:", error?.name, error?.message);
+          await sendMessage(
+            chatId,
+            "❌ No pude generar tu link de dashboard en este momento. Intenta de nuevo en unos minutos."
+          );
+        }
         return;
       }
 
