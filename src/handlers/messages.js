@@ -304,7 +304,8 @@ export function createMessageHandler({
             linkToken,
             chatId,
             expiresAt,
-            createdAt: now
+            createdAt: now,
+            requestId: requestId || null
           });
 
           const from = monthOffset(now, -6);
@@ -324,7 +325,7 @@ export function createMessageHandler({
           console.error("❌ Error creando link de dashboard:", error?.name, error?.message);
           await sendMessage(
             chatId,
-            "❌ No pude generar tu link de dashboard en este momento. Intenta de nuevo en unos minutos."
+            "❌ No pude preparar tu acceso al dashboard en este momento. Intenta de nuevo en unos minutos."
           );
         }
         return;

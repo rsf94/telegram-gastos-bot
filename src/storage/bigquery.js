@@ -15,6 +15,49 @@ import {
 } from "../cache/card_rules_cache.js";
 
 const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
+let userLinksTableOverride = null;
+
+function getUserLinksTable() {
+  if (userLinksTableOverride) return userLinksTableOverride;
+  return bq.dataset(BQ_DATASET).table("user_links");
+}
+
+function tokenPreview(token) {
+  const value = String(token || "");
+  return {
+    prefix: value.slice(0, 6),
+    length: value.length
+  };
+}
+
+function sanitizeForLogs(input, { linkToken }) {
+  if (typeof input === "string") {
+    if (!linkToken) return input;
+    return input.split(linkToken).join("[REDACTED_LINK_TOKEN]");
+  }
+  if (Array.isArray(input)) {
+    return input.map((value) => sanitizeForLogs(value, { linkToken }));
+  }
+  if (input && typeof input === "object") {
+    const out = {};
+    for (const [key, value] of Object.entries(input)) {
+      out[key] = sanitizeForLogs(value, { linkToken });
+    }
+    return out;
+  }
+  return input;
+}
+
+function buildInsertErrorDetails(err, linkToken) {
+  const errors = [];
+  if (Array.isArray(err?.errors)) {
+    errors.push(...err.errors);
+  }
+  if (Array.isArray(err?.response?.insertErrors)) {
+    errors.push(...err.response.insertErrors);
+  }
+  return sanitizeForLogs(errors, { linkToken });
+}
 
 /* =======================
  * Helpers
@@ -88,21 +131,47 @@ export async function insertExpenseToBQ(draft, chatId) {
   return row.id;
 }
 
-export async function insertPendingUserLink({ linkToken, chatId, expiresAt, createdAt = new Date() }) {
-  const table = bq.dataset(BQ_DATASET).table("user_links");
-  await table.insert([
-    {
-      link_token: String(linkToken),
-      chat_id: String(chatId),
-      status: "PENDING",
-      created_at: createdAt.toISOString(),
-      provider: "telegram",
-      expires_at: expiresAt.toISOString(),
-      metadata: {
-        telegram_chat_id: String(chatId)
-      }
-    }
-  ]);
+export async function insertPendingUserLink({
+  linkToken,
+  chatId,
+  expiresAt,
+  createdAt = new Date(),
+  requestId = null
+}) {
+  const table = getUserLinksTable();
+  const chatIdString = String(chatId);
+  const row = {
+    link_token: String(linkToken),
+    chat_id: chatIdString,
+    status: "PENDING",
+    created_at: new Date(createdAt).toISOString(),
+    expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
+    email: null,
+    provider: "telegram",
+    linked_at: null,
+    last_seen_at: null,
+    metadata: JSON.stringify({ telegram_chat_id: chatIdString })
+  };
+
+  try {
+    await table.insert([row]);
+  } catch (err) {
+    const payload = {
+      type: "bq_insert_error",
+      table: "gastos.user_links",
+      flow: "dashboard_link",
+      request_id: requestId,
+      chat_id: chatIdString,
+      link_token_preview: tokenPreview(linkToken),
+      errors: buildInsertErrorDetails(err, String(linkToken))
+    };
+    console.error(JSON.stringify(payload));
+    throw err;
+  }
+}
+
+export function __setUserLinksTableForTests(table) {
+  userLinksTableOverride = table;
 }
 
 /* =======================
