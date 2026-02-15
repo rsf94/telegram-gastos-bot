@@ -10,7 +10,11 @@ import {
   processEnrichmentRetryQueue,
   runEnrichmentUpdateWithRetry
 } from "../src/usecases/enrichment_retry.js";
-import { buildLatestEnrichmentRetryQuery } from "../src/storage/bigquery.js";
+import {
+  buildLatestEnrichmentRetryQuery,
+  insertPendingUserLink,
+  __setUserLinksTableForTests
+} from "../src/storage/bigquery.js";
 import { getDraft, getPendingDelete, __resetState } from "../src/state.js";
 import { guessCategory } from "../src/parsing.js";
 import { __resetConfirmIdempotency } from "../src/cache/confirm_idempotency.js";
@@ -240,12 +244,112 @@ test("/dashboard insert receives required BigQuery fields", async () => {
         "chatId",
         "createdAt",
         "expiresAt",
-        "linkToken"
+        "linkToken",
+        "requestId"
       ]);
       assert.equal(inserts[0].chatId, "701");
       assert.equal(inserts[0].createdAt instanceof Date, true);
       assert.equal(inserts[0].expiresAt instanceof Date, true);
       assert.match(inserts[0].linkToken, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    }
+  );
+});
+
+test("insertPendingUserLink logs bq_insert_error for partial failures without leaking token", async () => {
+  const capturedErrors = [];
+  const originalError = console.error;
+  const linkToken = "abcdef123456.SECRET_SUFFIX";
+
+  __setUserLinksTableForTests({
+    insert: async () => {
+      const error = new Error("partial failure");
+      error.name = "PartialFailureError";
+      error.errors = [
+        { errors: [{ reason: "invalid", message: "bad metadata", location: "metadata" }] }
+      ];
+      error.response = {
+        insertErrors: [
+          { index: 0, errors: [{ reason: "invalid", message: "metadata invalid", location: "metadata" }] }
+        ]
+      };
+      throw error;
+    }
+  });
+
+  console.error = (...args) => {
+    capturedErrors.push(args.join(" "));
+  };
+
+  try {
+    await assert.rejects(
+      insertPendingUserLink({
+        linkToken,
+        chatId: 123,
+        expiresAt: new Date("2026-01-01T00:15:00.000Z"),
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        requestId: "req-1"
+      }),
+      /partial failure/
+    );
+  } finally {
+    console.error = originalError;
+    __setUserLinksTableForTests(null);
+  }
+
+  const logLine = capturedErrors.find((line) => line.includes('"type":"bq_insert_error"'));
+  assert.ok(logLine);
+  assert.ok(logLine.includes('"errors":'));
+  assert.ok(!logLine.includes(linkToken));
+  assert.ok(/"link_token_preview":\{"prefix":"abcdef","length":\d+\}/.test(logLine));
+});
+
+test("insertPendingUserLink sends snake_case payload and string chat_id", async () => {
+  const rows = [];
+  __setUserLinksTableForTests({
+    insert: async (payload) => {
+      rows.push(...payload);
+    }
+  });
+
+  try {
+    await insertPendingUserLink({
+      linkToken: "abc.def",
+      chatId: 456,
+      expiresAt: new Date("2026-01-01T00:15:00.000Z"),
+      createdAt: new Date("2026-01-01T00:00:00.000Z")
+    });
+  } finally {
+    __setUserLinksTableForTests(null);
+  }
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].link_token, "abc.def");
+  assert.equal(rows[0].chat_id, "456");
+  assert.equal(rows[0].created_at, "2026-01-01T00:00:00.000Z");
+  assert.equal(rows[0].expires_at, "2026-01-01T00:15:00.000Z");
+  assert.equal(rows[0].metadata, JSON.stringify({ telegram_chat_id: "456" }));
+  assert.ok(!("linkToken" in rows[0]));
+});
+
+test("/dashboard insert failure replies clear error", async () => {
+  await withEnv(
+    {
+      DASHBOARD_BASE_URL: "https://corte-web.example",
+      LINK_TOKEN_SECRET: "dash-secret"
+    },
+    async () => {
+      __resetState();
+      const { sendMessage, messages } = createMessageSpy();
+      const handler = createMessageHandler({
+        sendMessage,
+        insertPendingUserLinkFn: async () => {
+          throw new Error("PartialFailureError");
+        }
+      });
+
+      await handler({ chat: { id: 79 }, text: "/dashboard" }, { requestId: "req-79" });
+
+      assert.ok(messages.at(-1).text.includes("No pude preparar tu acceso al dashboard"));
     }
   );
 });
