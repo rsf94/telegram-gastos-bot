@@ -21,6 +21,7 @@ import {
   getCardRule,
   getActiveCardNames
 } from "../src/cache/card_rules_cache.js";
+import { createLinkToken } from "../src/linking.js";
 
 function base64UrlDecode(value) {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -171,21 +172,86 @@ test("/link token verifies and includes payload", async () => {
 });
 
 test("/dashboard returns dashboard URL", async () => {
-  await withEnv({ DASHBOARD_BASE_URL: "https://corte-web.example" }, async () => {
-    __resetState();
-    const { sendMessage, messages } = createMessageSpy();
-    const handler = createMessageHandler({ sendMessage });
+  await withEnv(
+    {
+      DASHBOARD_BASE_URL: "https://corte-web.example",
+      LINK_TOKEN_SECRET: "dash-secret"
+    },
+    async () => {
+      __resetState();
+      const { sendMessage, messages } = createMessageSpy();
+      const inserts = [];
+      const handler = createMessageHandler({
+        sendMessage,
+        insertPendingUserLinkFn: async (payload) => {
+          inserts.push(payload);
+        }
+      });
 
-    await handler({ chat: { id: 77 }, text: "/dashboard" });
+      await handler({ chat: { id: 77 }, text: "/dashboard" });
 
-    const reply = messages.at(-1).text;
-    assert.ok(reply.includes("/dashboard"));
-    assert.ok(!reply.includes(welcomeText()));
+      const reply = messages.at(-1).text;
+      assert.ok(reply.includes("/dashboard?link_token="));
+      assert.ok(reply.includes("Expira en 15 min"));
+      assert.equal(inserts.length, 1);
+      assert.equal(inserts[0].chatId, "77");
+      assert.ok(inserts[0].linkToken);
+      assert.ok(inserts[0].expiresAt instanceof Date);
+      assert.ok(!reply.includes(welcomeText()));
+    }
+  );
+});
+
+test("createLinkToken returns expected format and ttl", () => {
+  const now = new Date("2026-01-01T00:00:00.000Z");
+  const { linkToken, expiresAt } = createLinkToken({
+    secret: "token-secret",
+    now
   });
+
+  assert.match(linkToken, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+  const [randomPart, signature] = linkToken.split(".");
+  assert.equal(randomPart.length, 32);
+  assert.equal(signature.length, 43);
+  assert.equal(expiresAt.toISOString(), "2026-01-01T00:15:00.000Z");
+});
+
+test("/dashboard insert receives required BigQuery fields", async () => {
+  await withEnv(
+    {
+      DASHBOARD_BASE_URL: "https://corte-web.example",
+      LINK_TOKEN_SECRET: "dash-secret"
+    },
+    async () => {
+      __resetState();
+      const { sendMessage } = createMessageSpy();
+      const inserts = [];
+      const handler = createMessageHandler({
+        sendMessage,
+        insertPendingUserLinkFn: async (payload) => {
+          inserts.push(payload);
+        }
+      });
+
+      await handler({ chat: { id: 701 }, text: "/dashboard" });
+
+      assert.equal(inserts.length, 1);
+      assert.deepEqual(Object.keys(inserts[0]).sort(), [
+        "chatId",
+        "createdAt",
+        "expiresAt",
+        "linkToken"
+      ]);
+      assert.equal(inserts[0].chatId, "701");
+      assert.equal(inserts[0].createdAt instanceof Date, true);
+      assert.equal(inserts[0].expiresAt instanceof Date, true);
+      assert.match(inserts[0].linkToken, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    }
+  );
 });
 
 test("/dashboard warns when env vars are missing", async () => {
-  await withEnv({ DASHBOARD_BASE_URL: undefined }, async () => {
+  await withEnv({ DASHBOARD_BASE_URL: undefined, LINK_TOKEN_SECRET: undefined }, async () => {
     __resetState();
     const { sendMessage, messages } = createMessageSpy();
     const handler = createMessageHandler({ sendMessage });

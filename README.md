@@ -48,6 +48,7 @@ El bot mostrará un preview y pedirá confirmación.
 - `/cuentas` → lista cuentas de débito/efectivo (crea “Efectivo” si no existe)
 - `/alta_cuenta Nombre | Institución | Tipo` → registra cuenta (tipo: `DEBIT` o `CASH`)
 - `/mov ...` → registra movimientos de efectivo/débito (retiro, depósito, transfer)
+- `/dashboard` → genera URL de vinculación. Run /dashboard to get a linking URL. Open it while logged in.
 
 #### Ledger (efectivo / débito)
 
@@ -116,6 +117,8 @@ Configura estas env vars en Cloud Run:
 - `BQ_PROJECT_ID` → ID del proyecto GCP
 - `BQ_DATASET` → dataset (ej. `gastos`)
 - `BQ_TABLE` → tabla principal (ej. `expenses`)
+- `DASHBOARD_BASE_URL` → URL base de corte-web (ej. `https://corte-web.example`)
+- `LINK_TOKEN_SECRET` → secreto para firmar link tokens de vinculación
 
 ### LLM (recomendado)
 - `GEMINI_API_KEY` → habilita enriquecimiento con Gemini
