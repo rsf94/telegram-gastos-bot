@@ -585,7 +585,7 @@ test("normal flow choose payment and confirm", async () => {
         description: baseDraft.description
       }),
       llmProviderEnv: "local",
-      getActiveTripIdFn: async () => null
+      resolveActiveTripForChatFn: async () => null
     });
     saved = draft;
     return result;
@@ -643,7 +643,7 @@ test("msi flow months payment confirm", async () => {
         description: baseDraft.description
       }),
       llmProviderEnv: "local",
-      getActiveTripIdFn: async () => null
+      resolveActiveTripForChatFn: async () => null
     });
     saved = draft;
     return result;
@@ -774,7 +774,7 @@ test("confirm idempotency prevents duplicate inserts", async () => {
       cache_hit: false
     }),
     llmProviderEnv: "local",
-    getActiveTripIdFn: async () => null
+    resolveActiveTripForChatFn: async () => null
   });
 
   await saveExpense({
@@ -787,7 +787,7 @@ test("confirm idempotency prevents duplicate inserts", async () => {
       throw new Error("LLM should not be called");
     },
     llmProviderEnv: "local",
-    getActiveTripIdFn: async () => null
+    resolveActiveTripForChatFn: async () => null
   });
 
   assert.equal(insertCount, 1);

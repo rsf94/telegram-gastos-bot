@@ -3,8 +3,7 @@ import { LLM_PROVIDER } from "../config.js";
 import {
   insertExpenseAndMaybeInstallments,
   updateExpenseEnrichment,
-  enqueueEnrichmentRetry,
-  getActiveTripId
+  enqueueEnrichmentRetry
 } from "../storage/bigquery.js";
 import { escapeHtml, tgSend } from "../telegram.js";
 import { enrichExpenseLLM } from "../gemini.js";
@@ -15,6 +14,7 @@ import {
   setIdempotencySaved,
   clearIdempotencyEntry
 } from "../cache/confirm_idempotency.js";
+import { resolveActiveTripForChat } from "./resolve_active_trip.js";
 
 function formatBigQueryError(e) {
   if (!e) return "Error desconocido";
@@ -80,7 +80,7 @@ export async function saveExpense({
   enqueueEnrichmentRetryFn = enqueueEnrichmentRetry,
   enrichExpenseLLMFn = enrichExpenseLLM,
   llmProviderEnv = LLM_PROVIDER,
-  getActiveTripIdFn = getActiveTripId
+  resolveActiveTripForChatFn = resolveActiveTripForChat
 }) {
   const perf = draft.__perf || {};
   const parseMs = Number(perf.parse_ms || 0);
@@ -116,26 +116,23 @@ export async function saveExpense({
 
     setIdempotencyPending(idempotencyKey);
 
-    let activeTripId = null;
-    try {
-      activeTripId = await getActiveTripIdFn(chatId);
-    } catch (tripError) {
-      logPerf(
-        {
-          request_id: requestId,
-          flow: "trip",
-          option: "GET_ACTIVE_TRIP",
-          chat_id: chatId,
-          err_short: shortError(tripError),
-          status: "error"
-        },
-        "warn"
-      );
-    }
+    const resolvedTrip = draft.trip_id
+      ? { trip_id: draft.trip_id, trip_name: draft.trip_name || null }
+      : await resolveActiveTripForChatFn(chatId);
 
-    const draftWithTrip = activeTripId ? { ...draft, trip_id: activeTripId } : draft;
+    const tripId = resolvedTrip?.trip_id || null;
+    const draftWithTrip = tripId ? { ...draft, trip_id: tripId } : draft;
     const expenseId = await insertExpense(draftWithTrip, chatId);
     setIdempotencySaved(idempotencyKey, expenseId);
+    console.log(
+      JSON.stringify({
+        type: "expense_saved",
+        expense_id: String(expenseId),
+        chat_id: String(chatId),
+        trip_id: tripId,
+        has_trip: Boolean(tripId)
+      })
+    );
     const bqInsertMs = Date.now() - bqStart;
     await sendMessage(
       chatId,
@@ -228,6 +225,15 @@ export async function saveExpense({
 
     return { ok: true, expenseId };
   } catch (e) {
+    const tripId = draft?.trip_id || null;
+    console.warn(
+      JSON.stringify({
+        type: "expense_save_error",
+        chat_id: String(chatId),
+        trip_id: tripId,
+        msg: shortError(e)
+      })
+    );
     try {
       const idempotencyKey = buildIdempotencyKey({ chatId, draft });
       clearIdempotencyEntry(idempotencyKey);

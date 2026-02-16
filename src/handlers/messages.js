@@ -46,6 +46,7 @@ import {
 import { createLinkToken } from "../linking.js";
 import { getActiveCardRules } from "../cache/card_rules_cache.js";
 import { saveExpense } from "../usecases/save_expense.js";
+import { resolveActiveTripForChat } from "../usecases/resolve_active_trip.js";
 import { helpText, welcomeText } from "../ui/copy.js";
 import { buildUpcomingPaymentsReport } from "../payments.js";
 import {
@@ -233,6 +234,7 @@ export function createMessageHandler({
   setActiveTripFn = setActiveTrip,
   getActiveTripIdFn = getActiveTripId,
   listTripsFn = listTrips,
+  resolveActiveTripForChatFn = resolveActiveTripForChat,
   handleAnalysisCommand
 } = {}) {
   return async function handleMessage(msg, { requestId } = {}) {
@@ -942,6 +944,12 @@ export function createMessageHandler({
       draft.description = cleanTextForDescription(text, amountToken, null) || "Gasto";
       draft.merchant = guessMerchant(text) || "";
       draft.category = guessCategory(`${draft.merchant} ${draft.description}`);
+
+      const activeTrip = await resolveActiveTripForChatFn(chatId, {
+        getActiveTripIdFn
+      });
+      draft.trip_id = activeTrip?.trip_id || null;
+      draft.trip_name = activeTrip?.trip_name || null;
 
       const err = validateDraft(draft, { skipPaymentMethod: true });
       if (err) {
