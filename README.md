@@ -131,6 +131,9 @@ Configura estas env vars en Cloud Run:
 - `CRON_TOKEN` → protege `/cron/daily` y `/cron/enrich`
 - `CARD_RULES_CACHE_TTL_MS` → TTL del cache de reglas de tarjetas (ms)
 
+### FX
+- `FX_BASE_URL` → opcional, default `https://api.frankfurter.dev/v1`
+
 ### Tablas extra
 - `BQ_ENRICHMENT_RETRY_TABLE` → tabla para reintentos de enriquecimiento (default `enrichment_retry`)
 
@@ -200,6 +203,22 @@ Configura un job diario en Cloud Scheduler para enviar recordatorios 1 día ante
 - **Token**: usa el mismo `CRON_TOKEN` que ya existe (no se agrega ninguna variable nueva)
 
 ---
+
+## 💱 FX provider: Frankfurter
+
+El módulo de FX expone `getFxRate` para consultar tipo de cambio histórico (UTC) con fallback de hasta 7 días hacia atrás y cache en memoria por proceso.
+
+```js
+import { getFxRate } from "./src/fx/index.js";
+
+const fx = await getFxRate({
+  date: "2025-01-13",
+  base: "JPY",
+  quote: "MXN"
+});
+
+// { ok: true, date: "2025-01-13", base: "JPY", quote: "MXN", rate: 0.12345, provider: "frankfurter" }
+```
 
 ## 🧪 Debug de `/cron/enrich`
 

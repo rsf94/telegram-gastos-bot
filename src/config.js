@@ -12,6 +12,7 @@ export const BQ_ENRICHMENT_RETRY_TABLE =
   process.env.BQ_ENRICHMENT_RETRY_TABLE || "enrichment_retry";
 export const DASHBOARD_BASE_URL = process.env.DASHBOARD_BASE_URL;
 export const LINK_TOKEN_SECRET = process.env.LINK_TOKEN_SECRET;
+export const FX_BASE_URL = process.env.FX_BASE_URL || "https://api.frankfurter.dev/v1";
 
 export const ALLOWED_PAYMENT_METHODS = [
   "Banorte Platino",
