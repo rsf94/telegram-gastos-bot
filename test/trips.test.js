@@ -144,13 +144,16 @@ test("draft y confirmación muestran viaje activo", async () => {
 
   setActiveTripCache("501", {
     tripId: "9baf6887-aaaa-bbbb-cccc-111111111111",
-    tripName: "Japon_2026"
+    tripName: "Japon_2026",
+    baseCurrency: "JPY"
   });
 
   await handler({ chat: { id: 501 }, text: "200 JPY ramen" });
   const draft = getDraft("501");
   assert.equal(draft.trip_id, "9baf6887-aaaa-bbbb-cccc-111111111111");
   assert.equal(draft.trip_name, "Japon_2026");
+  assert.equal(draft.currency, "JPY");
+  assert.equal(draft.currency_explicit, true);
 
   const callbackHandler = createCallbackHandler({
     sendMessage,
@@ -182,7 +185,8 @@ test("tap en No es del viaje excluye trip_id y muestra botón para reactivar", a
 
   setActiveTripCache("777", {
     tripId: "9baf6887-aaaa-bbbb-cccc-111111111111",
-    tripName: "Japon_2026"
+    tripName: "Japon_2026",
+    baseCurrency: "JPY"
   });
 
   await handler({ chat: { id: 777 }, text: "200 ramen" });
@@ -214,10 +218,69 @@ test("tap en No es del viaje excluye trip_id y muestra botón para reactivar", a
   const draftAfterExclude = getDraft("777");
   assert.equal(draftAfterExclude.trip_id, null);
   assert.equal(draftAfterExclude.trip_name, null);
+  assert.equal(draftAfterExclude.currency, "MXN");
 
   const afterToggle = messages.at(-1);
   assert.ok(afterToggle.extra.reply_markup.inline_keyboard.flat().some((btn) => btn.text === "↩️ Sí es del viaje"));
   assert.ok(afterToggle.text.includes("Viaje: <b>Japon_2026 (excluido)</b>"));
+
+  await callbackHandler({
+    id: "cb-trip-toggle-1b",
+    data: "trip_include",
+    message: { chat: { id: 777 }, message_id: 10 }
+  });
+
+  const draftAfterInclude = getDraft("777");
+  assert.equal(draftAfterInclude.trip_id, "9baf6887-aaaa-bbbb-cccc-111111111111");
+  assert.equal(draftAfterInclude.currency, "JPY");
+});
+
+test("moneda explícita se respeta aunque se excluya/incluya viaje", async () => {
+  __resetState();
+  __resetActiveTripCache();
+  const { sendMessage } = createMessageSpy();
+
+  const handler = createMessageHandler({
+    sendMessage,
+    getActiveCardNamesFn: async () => ["BBVA Platino"]
+  });
+
+  setActiveTripCache("7780", {
+    tripId: "trip-usd-1",
+    tripName: "NYC",
+    baseCurrency: "JPY"
+  });
+
+  await handler({ chat: { id: 7780 }, text: "10 USD taxi" });
+
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage: async () => {},
+    answerCallback: async () => {},
+    getActiveCardNamesFn: async () => ["BBVA Platino"]
+  });
+
+  await callbackHandler({
+    id: "cb-trip-usd-pay",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 7780 }, message_id: 111 }
+  });
+
+  await callbackHandler({
+    id: "cb-trip-usd-toggle-a",
+    data: "trip_exclude",
+    message: { chat: { id: 7780 }, message_id: 111 }
+  });
+
+  await callbackHandler({
+    id: "cb-trip-usd-toggle-b",
+    data: "trip_include",
+    message: { chat: { id: 7780 }, message_id: 111 }
+  });
+
+  const draft = getDraft("7780");
+  assert.equal(draft.currency, "USD");
+  assert.equal(draft.currency_explicit, true);
 });
 
 test("sin viaje activo no muestra botones extras de viaje", async () => {
@@ -266,7 +329,7 @@ test("confirmar guarda sin trip_id cuando el usuario excluye viaje", async () =>
     getActiveCardNamesFn: async () => ["BBVA Platino"]
   });
 
-  setActiveTripCache("779", { tripId: "trip-active-x", tripName: "Chile" });
+  setActiveTripCache("779", { tripId: "trip-active-x", tripName: "Chile", baseCurrency: "CLP" });
 
   await handler({ chat: { id: 779 }, text: "350 cena" });
 
@@ -300,6 +363,7 @@ test("confirmar guarda sin trip_id cuando el usuario excluye viaje", async () =>
   assert.equal(savedDrafts.length, 1);
   assert.equal(savedDrafts[0].trip_id, null);
   assert.equal(savedDrafts[0].active_trip_id, "trip-active-x");
+  assert.equal(savedDrafts[0].currency, "MXN");
 });
 
 test("saveExpense no truena sin viaje activo y no inserta trip_id", async () => {
@@ -344,40 +408,61 @@ test("saveExpense no truena sin viaje activo y no inserta trip_id", async () => 
   assert.equal("trip_id" in calls[0], false);
 });
 
-test("/viaje nuevo y /viaje actual funcionan en smoke", async () => {
+test("/viaje nuevo solicita moneda y crea viaje solo con ISO válido", async () => {
   __resetState();
   __resetActiveTripCache();
   const { sendMessage, messages } = createMessageSpy();
+  const createCalls = [];
+  const setCalls = [];
 
   const handler = createMessageHandler({
     sendMessage,
-    createTripFn: async ({ chat_id, name }) => ({
-      trip_id: "123e4567-e89b-12d3-a456-426614174000",
-      chat_id,
-      name
-    }),
-    setActiveTripFn: async () => {},
+    createTripFn: async (payload) => {
+      createCalls.push(payload);
+      return {
+        trip_id: "123e4567-e89b-12d3-a456-426614174000",
+        chat_id: payload.chat_id,
+        name: payload.name,
+        base_currency: payload.base_currency
+      };
+    },
+    setActiveTripFn: async (payload) => {
+      setCalls.push(payload);
+    },
     getActiveTripIdFn: async () => "123e4567-e89b-12d3-a456-426614174000",
     listTripsFn: async () => [
       {
         trip_id: "123e4567-e89b-12d3-a456-426614174000",
-        name: "Viaje CDMX"
+        name: "Viaje CDMX",
+        base_currency: "JPY"
       }
     ]
   });
 
   await handler({ chat: { id: 88 }, text: "/viaje nuevo Viaje CDMX" });
+  assert.ok(messages[0].text.includes("¿En qué moneda"));
+  assert.equal(createCalls.length, 0);
+
+  await handler({ chat: { id: 88 }, text: "JP" });
+  assert.ok(messages[1].text.includes("Código inválido"));
+  assert.equal(createCalls.length, 0);
+
+  await handler({ chat: { id: 88 }, text: "jpy" });
+  assert.equal(createCalls.length, 1);
+  assert.equal(createCalls[0].base_currency, "JPY");
+  assert.equal(setCalls.length, 1);
+  assert.equal(setCalls[0].trip_id, "123e4567-e89b-12d3-a456-426614174000");
+  assert.equal(getActiveTripCache("88")?.baseCurrency, "JPY");
+
   await handler({ chat: { id: 88 }, text: "/viaje actual" });
-
-  assert.ok(messages[0].text.includes("Viaje activo"));
-  assert.ok(messages[1].text.includes("Viaje CDMX"));
-  assert.ok(messages[1].text.includes("123e4567-e89b-12d3-a456-426614174000"));
+  assert.ok(messages[2].text.includes("Moneda base: <b>JPY</b>"));
+  assert.ok(messages[3].text.includes("Viaje CDMX"));
+  assert.ok(messages[3].text.includes("123e4567-e89b-12d3-a456-426614174000"));
 });
-
 test("flujo de gasto usa cache de viaje y no consulta BigQuery en hot-path", async () => {
   __resetState();
   __resetActiveTripCache();
-  setActiveTripCache("901", { tripId: "trip-cache-1", tripName: "Roma" });
+  setActiveTripCache("901", { tripId: "trip-cache-1", tripName: "Roma", baseCurrency: "JPY" });
 
   let activeTripLookups = 0;
   const { sendMessage } = createMessageSpy();
@@ -395,6 +480,8 @@ test("flujo de gasto usa cache de viaje y no consulta BigQuery en hot-path", asy
   const draft = getDraft("901");
   assert.equal(draft.trip_id, "trip-cache-1");
   assert.equal(draft.trip_name, "Roma");
+  assert.equal(draft.currency, "JPY");
+  assert.equal(draft.currency_explicit, false);
   assert.equal(activeTripLookups, 0);
 });
 
@@ -418,13 +505,14 @@ test("sin cache de viaje el draft queda sin trip_id y no consulta BigQuery", asy
   const draft = getDraft("902");
   assert.equal(draft.trip_id, null);
   assert.equal(draft.active_trip_id, null);
+  assert.equal(draft.currency, "MXN");
   assert.equal(activeTripLookups, 0);
 });
 
 test("/viaje apagar persiste sentinel append-only y limpia cache", async () => {
   __resetState();
   __resetActiveTripCache();
-  setActiveTripCache("903", { tripId: "trip-old", tripName: "Old" });
+  setActiveTripCache("903", { tripId: "trip-old", tripName: "Old", baseCurrency: "USD" });
 
   const { sendMessage, messages } = createMessageSpy();
   const setCalls = [];
