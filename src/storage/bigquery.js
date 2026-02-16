@@ -9,6 +9,8 @@ import {
   BQ_TABLE,
   BQ_ENRICHMENT_RETRY_TABLE
 } from "../config.js";
+
+export const ACTIVE_TRIP_NONE_SENTINEL = "__NONE__";
 import {
   getCardRuleWithMeta,
   getActiveCardNames as getActiveCardNamesCached
@@ -210,9 +212,13 @@ export async function createTrip({
 
 export async function setActiveTrip({ chat_id, trip_id, metadata = null }, { tableClient } = {}) {
   const table = tableClient || bq.dataset(BQ_DATASET).table("trip_state");
+  const activeTripId =
+    trip_id === null || trip_id === undefined || trip_id === ""
+      ? ACTIVE_TRIP_NONE_SENTINEL
+      : String(trip_id);
   const row = {
     chat_id: String(chat_id),
-    active_trip_id: String(trip_id),
+    active_trip_id: activeTripId,
     set_at: new Date().toISOString(),
     updated_at: null,
     metadata: toMetadataValue(metadata)
@@ -242,7 +248,9 @@ export async function getActiveTripId(chatId, { bigqueryClient } = {}) {
   const client = bigqueryClient || bq;
   const [job] = await client.createQueryJob(options);
   const [rows] = await job.getQueryResults();
-  return rows?.[0]?.active_trip_id || null;
+  const activeTripId = rows?.[0]?.active_trip_id || null;
+  if (!activeTripId || activeTripId === ACTIVE_TRIP_NONE_SENTINEL) return null;
+  return activeTripId;
 }
 
 export async function listTrips(chatId, limit = 10, { bigqueryClient } = {}) {
