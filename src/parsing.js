@@ -80,6 +80,12 @@ function tripShortId(tripId) {
 function formatTripLabel(draft) {
   const tripName = String(draft?.trip_name || "").trim();
   const tripId = String(draft?.trip_id || "").trim();
+  const activeTripName = String(draft?.active_trip_name || "").trim();
+  const hasActiveTrip = Boolean(String(draft?.active_trip_id || "").trim());
+
+  if (hasActiveTrip && !tripId) {
+    return activeTripName || "Viaje activo";
+  }
   if (tripName && tripId) return `${tripName} (${tripShortId(tripId)}…)`;
   if (tripName) return tripName;
   if (tripId) return tripShortId(tripId);

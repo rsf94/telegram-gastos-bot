@@ -87,7 +87,7 @@ test("getActiveTripId regresa null cuando no hay filas", async () => {
   assert.match(querySeen, /trip_state/);
 });
 
-test("saveExpense incluye trip_id cuando hay viaje activo", async () => {
+test("saveExpense incluye trip_id del draft cuando aplica", async () => {
   __resetConfirmIdempotency();
   const { sendMessage } = createMessageSpy();
   const calls = [];
@@ -103,6 +103,8 @@ test("saveExpense incluye trip_id cuando hay viaje activo", async () => {
     is_msi: false,
     msi_months: null,
     msi_total_amount: null,
+    trip_id: "trip-active-1",
+    trip_name: "Japon_2026",
     __perf: { parse_ms: 1, cache_hit: { card_rules: true, llm: null } }
   };
 
@@ -110,10 +112,6 @@ test("saveExpense incluye trip_id cuando hay viaje activo", async () => {
     chatId: "50",
     draft,
     sendMessage,
-    resolveActiveTripForChatFn: async () => ({
-      trip_id: "trip-active-1",
-      trip_name: "Japon_2026"
-    }),
     insertExpense: async (insertDraft) => {
       calls.push(insertDraft);
       return "exp-trip-1";
@@ -169,6 +167,137 @@ test("draft y confirmación muestran viaje activo", async () => {
   assert.ok(messages.at(-1).text.includes("Japon_2026"));
 });
 
+test("tap en No es del viaje excluye trip_id y muestra botón para reactivar", async () => {
+  __resetState();
+  const { sendMessage, messages } = createMessageSpy();
+
+  const handler = createMessageHandler({
+    sendMessage,
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    resolveActiveTripForChatFn: async () => ({
+      trip_id: "9baf6887-aaaa-bbbb-cccc-111111111111",
+      trip_name: "Japon_2026"
+    })
+  });
+
+  await handler({ chat: { id: 777 }, text: "200 ramen" });
+
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage: async (_chatId, _messageId, text, extra) => {
+      messages.push({ text, extra });
+    },
+    answerCallback: async () => {},
+    getActiveCardNamesFn: async () => ["BBVA Platino"]
+  });
+
+  await callbackHandler({
+    id: "cb-trip-pay-1",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 777 }, message_id: 10 }
+  });
+
+  const beforeToggle = messages.at(-1);
+  assert.ok(beforeToggle.extra.reply_markup.inline_keyboard.flat().some((btn) => btn.text === "🚫 No es del viaje"));
+
+  await callbackHandler({
+    id: "cb-trip-toggle-1",
+    data: "trip_exclude",
+    message: { chat: { id: 777 }, message_id: 10 }
+  });
+
+  const draftAfterExclude = getDraft("777");
+  assert.equal(draftAfterExclude.trip_id, null);
+  assert.equal(draftAfterExclude.trip_name, null);
+
+  const afterToggle = messages.at(-1);
+  assert.ok(afterToggle.extra.reply_markup.inline_keyboard.flat().some((btn) => btn.text === "↩️ Sí es del viaje"));
+  assert.ok(afterToggle.text.includes("Viaje: <b>Japon_2026</b>"));
+});
+
+test("sin viaje activo no muestra botones extras de viaje", async () => {
+  __resetState();
+  const { sendMessage, messages } = createMessageSpy();
+
+  const handler = createMessageHandler({
+    sendMessage,
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    resolveActiveTripForChatFn: async () => null
+  });
+
+  await handler({ chat: { id: 778 }, text: "200 ramen" });
+
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage: async (_chatId, _messageId, text, extra) => {
+      messages.push({ text, extra });
+    },
+    answerCallback: async () => {},
+    getActiveCardNamesFn: async () => ["BBVA Platino"]
+  });
+
+  await callbackHandler({
+    id: "cb-trip-pay-2",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 778 }, message_id: 11 }
+  });
+
+  const keyboard = messages.at(-1).extra.reply_markup.inline_keyboard.flat().map((btn) => btn.text);
+  assert.equal(keyboard.includes("🚫 No es del viaje"), false);
+  assert.equal(keyboard.includes("↩️ Sí es del viaje"), false);
+  const draft = getDraft("778");
+  assert.equal(draft.trip_id, null);
+  assert.equal(draft.active_trip_id, null);
+});
+
+test("confirmar guarda sin trip_id cuando el usuario excluye viaje", async () => {
+  __resetState();
+  const { sendMessage } = createMessageSpy();
+  const savedDrafts = [];
+
+  const handler = createMessageHandler({
+    sendMessage,
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    resolveActiveTripForChatFn: async () => ({
+      trip_id: "trip-active-x",
+      trip_name: "Chile"
+    })
+  });
+
+  await handler({ chat: { id: 779 }, text: "350 cena" });
+
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage: async () => {},
+    answerCallback: async () => {},
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    saveExpenseFn: async ({ draft }) => {
+      savedDrafts.push({ ...draft });
+      return { ok: true, expenseId: "exp-779" };
+    }
+  });
+
+  await callbackHandler({
+    id: "cb-trip-pay-3",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 779 }, message_id: 12 }
+  });
+  await callbackHandler({
+    id: "cb-trip-toggle-3",
+    data: "trip_exclude",
+    message: { chat: { id: 779 }, message_id: 12 }
+  });
+  await callbackHandler({
+    id: "cb-trip-confirm-3",
+    data: "confirm",
+    message: { chat: { id: 779 }, message_id: 12 }
+  });
+
+  assert.equal(savedDrafts.length, 1);
+  assert.equal(savedDrafts[0].trip_id, null);
+  assert.equal(savedDrafts[0].active_trip_id, "trip-active-x");
+});
+
 test("saveExpense no truena sin viaje activo y no inserta trip_id", async () => {
   __resetConfirmIdempotency();
   const { sendMessage } = createMessageSpy();
@@ -191,7 +320,6 @@ test("saveExpense no truena sin viaje activo y no inserta trip_id", async () => 
     chatId: "51",
     draft,
     sendMessage,
-    resolveActiveTripForChatFn: async () => null,
     insertExpense: async (insertDraft) => {
       calls.push(insertDraft);
       return "exp-no-trip-1";

@@ -14,7 +14,6 @@ import {
   setIdempotencySaved,
   clearIdempotencyEntry
 } from "../cache/confirm_idempotency.js";
-import { resolveActiveTripForChat } from "./resolve_active_trip.js";
 
 function formatBigQueryError(e) {
   if (!e) return "Error desconocido";
@@ -79,8 +78,7 @@ export async function saveExpense({
   updateExpenseEnrichmentFn = updateExpenseEnrichment,
   enqueueEnrichmentRetryFn = enqueueEnrichmentRetry,
   enrichExpenseLLMFn = enrichExpenseLLM,
-  llmProviderEnv = LLM_PROVIDER,
-  resolveActiveTripForChatFn = resolveActiveTripForChat
+  llmProviderEnv = LLM_PROVIDER
 }) {
   const perf = draft.__perf || {};
   const parseMs = Number(perf.parse_ms || 0);
@@ -116,12 +114,8 @@ export async function saveExpense({
 
     setIdempotencyPending(idempotencyKey);
 
-    const resolvedTrip = draft.trip_id
-      ? { trip_id: draft.trip_id, trip_name: draft.trip_name || null }
-      : await resolveActiveTripForChatFn(chatId);
-
-    const tripId = resolvedTrip?.trip_id || null;
-    const draftWithTrip = tripId ? { ...draft, trip_id: tripId } : draft;
+    const tripId = draft?.trip_id || null;
+    const draftWithTrip = tripId ? { ...draft, trip_id: tripId } : { ...draft };
     const expenseId = await insertExpense(draftWithTrip, chatId);
     setIdempotencySaved(idempotencyKey, expenseId);
     console.log(
