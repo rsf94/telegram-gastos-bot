@@ -279,6 +279,39 @@ export async function listTrips(chatId, limit = 10, { bigqueryClient } = {}) {
   return rows || [];
 }
 
+export async function getTripById(chatId, tripId, { bigqueryClient } = {}) {
+  const query = `
+    SELECT
+      trip_id,
+      chat_id,
+      name,
+      base_currency,
+      start_date,
+      end_date,
+      active,
+      created_at,
+      updated_at,
+      metadata
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.trips\`
+    WHERE chat_id = @chat_id AND trip_id = @trip_id
+    LIMIT 1
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      trip_id: String(tripId)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const client = bigqueryClient || bq;
+  const [job] = await client.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows?.[0] || null;
+}
+
 /* =======================
  * Traer reglas activas de tarjetas
  * ======================= */

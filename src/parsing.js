@@ -62,6 +62,30 @@ function formatMoneyMXN(n) {
   return x.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
 }
 
+function formatDraftAmount(draft) {
+  const amount = Number(draft?.amount_mxn || 0);
+  const currency = String(draft?.currency || "MXN").toUpperCase();
+  if (currency !== "MXN") {
+    return `${amount} ${currency}`;
+  }
+  return formatMoneyMXN(amount);
+}
+
+function tripShortId(tripId) {
+  const value = String(tripId || "").trim();
+  if (!value) return "";
+  return value.slice(0, 8);
+}
+
+function formatTripLabel(draft) {
+  const tripName = String(draft?.trip_name || "").trim();
+  const tripId = String(draft?.trip_id || "").trim();
+  if (tripName && tripId) return `${tripName} (${tripShortId(tripId)}…)`;
+  if (tripName) return tripName;
+  if (tripId) return tripShortId(tripId);
+  return "—";
+}
+
 /* =======================
  * Local-first parser (rápido)
  * ======================= */
@@ -421,7 +445,7 @@ export function paymentMethodPreview(d) {
     }
   } else {
     lines.push(`MSI: <b>no</b>`);
-    lines.push(`Monto: <b>${escapeHtml(formatMoneyMXN(d.amount_mxn))}</b>`);
+    lines.push(`Monto: <b>${escapeHtml(formatDraftAmount(d))}</b>`);
   }
 
   const paymentLabel = d.payment_method ? escapeHtml(d.payment_method) : "❓ (falta)";
@@ -465,12 +489,13 @@ export function preview(d) {
       lines.push("Mes de inicio: <b>❓ (falta)</b>");
     }
   } else {
-    lines.push(`Monto: <b>${escapeHtml(formatMoneyMXN(d.amount_mxn))}</b>`);
+    lines.push(`Monto: <b>${escapeHtml(formatDraftAmount(d))}</b>`);
   }
 
   const paymentLabel = d.payment_method ? escapeHtml(d.payment_method) : "❓ (falta)";
   lines.push(`Método: <b>${paymentLabel}</b>`);
   lines.push(`Fecha: <b>${escapeHtml(d.purchase_date)}</b>`);
+  lines.push(`Viaje: <b>${escapeHtml(formatTripLabel(d))}</b>`);
   lines.push(`Categoría: <b>${escapeHtml(d.category)}</b>`);
   lines.push(`Descripción: ${escapeHtml(d.description)}`);
   if (d.merchant) lines.push(`Comercio: ${escapeHtml(d.merchant)}`);
