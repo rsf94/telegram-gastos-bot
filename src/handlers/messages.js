@@ -889,7 +889,7 @@ export function createMessageHandler({
         existing.__state = "ready_to_confirm";
         setDraft(chatId, existing);
         await sendMessage(chatId, preview(existing), {
-          reply_markup: mainKeyboardFn()
+          reply_markup: mainKeyboardFn(existing)
         });
         return;
       }
@@ -948,6 +948,8 @@ export function createMessageHandler({
       const activeTrip = await resolveActiveTripForChatFn(chatId, {
         getActiveTripIdFn
       });
+      draft.active_trip_id = activeTrip?.trip_id || null;
+      draft.active_trip_name = activeTrip?.trip_name || null;
       draft.trip_id = activeTrip?.trip_id || null;
       draft.trip_name = activeTrip?.trip_name || null;
 

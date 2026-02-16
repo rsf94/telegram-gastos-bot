@@ -74,15 +74,22 @@ export async function tgEditMessage(chatId, messageId, text, extra = {}) {
  * ✏️ Editar
  * ✅ Confirmar | ❌ Cancelar
  */
-export function mainKeyboard() {
+export function mainKeyboard(draft = null) {
+  const rows = [[{ text: "✏️ Editar", callback_data: "edit_menu" }]];
+  const hasActiveTrip = Boolean(draft?.active_trip_id);
+  if (hasActiveTrip && draft?.trip_id) {
+    rows.push([{ text: "🚫 No es del viaje", callback_data: "trip_exclude" }]);
+  } else if (hasActiveTrip) {
+    rows.push([{ text: "↩️ Sí es del viaje", callback_data: "trip_include" }]);
+  }
+
+  rows.push([
+    { text: "✅ Confirmar", callback_data: "confirm" },
+    { text: "❌ Cancelar", callback_data: "cancel" }
+  ]);
+
   return {
-    inline_keyboard: [
-      [{ text: "✏️ Editar", callback_data: "edit_menu" }],
-      [
-        { text: "✅ Confirmar", callback_data: "confirm" },
-        { text: "❌ Cancelar", callback_data: "cancel" }
-      ]
-    ]
+    inline_keyboard: rows
   };
 }
 

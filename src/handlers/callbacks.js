@@ -255,6 +255,38 @@ export function createCallbackHandler({
         return;
       }
 
+      if (data === "trip_exclude" || data === "trip_include") {
+        option = data;
+        const draft = getDraft(chatId);
+
+        if (!draft) {
+          await sendMessage(chatId, "No tengo borrador. Mándame un gasto primero.");
+          await answerCallback(cb.id);
+          return;
+        }
+
+        if (data === "trip_exclude") {
+          draft.trip_id = null;
+          draft.trip_name = null;
+        } else {
+          draft.trip_id = draft.active_trip_id || null;
+          draft.trip_name = draft.active_trip_name || null;
+        }
+
+        setDraft(chatId, draft);
+        const messageId = cb.message?.message_id;
+        if (messageId) {
+          await editMessage(chatId, messageId, preview(draft), {
+            reply_markup: mainKeyboardFn(draft)
+          });
+        } else {
+          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn(draft) });
+        }
+
+        await answerCallback(cb.id);
+        return;
+      }
+
       // ✅ Confirmar (normal o MSI)
       if (data === "confirm") {
         option = "confirm";
@@ -310,7 +342,7 @@ export function createCallbackHandler({
         if (!draft) {
           await sendMessage(chatId, "No tengo borrador activo.");
         } else {
-          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
+          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn(draft) });
         }
         await answerCallback(cb.id);
         return;
@@ -380,10 +412,10 @@ export function createCallbackHandler({
 
         if (messageId) {
           await editMessage(chatId, messageId, preview(draft), {
-            reply_markup: mainKeyboardFn()
+            reply_markup: mainKeyboardFn(draft)
           });
         } else {
-          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn() });
+          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn(draft) });
         }
         await answerCallback(cb.id);
         return;
