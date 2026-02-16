@@ -22,6 +22,7 @@ function formatCurrency(value) {
 export default async function Dashboard({ searchParams }) {
   const token = searchParams.token ?? "";
   const chatId = searchParams.chat_id ?? "";
+  const linkToken = searchParams.link_token ?? "";
 
   const baseMonth = currentMonthISO();
   const defaultFrom = addMonthsISO(baseMonth, -5);
@@ -37,14 +38,16 @@ export default async function Dashboard({ searchParams }) {
   let data = null;
   let error = null;
 
-  if (token && chatId) {
+  if (linkToken || (token && chatId)) {
     const hdrs = headers();
     const host = hdrs.get("host");
     const proto = hdrs.get("x-forwarded-proto") ?? "http";
     const baseUrl = host ? `${proto}://${host}` : "";
     const apiUrl = new URL("/api/cashflow", baseUrl || "http://localhost:3000");
-    apiUrl.searchParams.set("token", token);
-    apiUrl.searchParams.set("chat_id", chatId);
+
+    if (linkToken) apiUrl.searchParams.set("link_token", linkToken);
+    if (token) apiUrl.searchParams.set("token", token);
+    if (chatId) apiUrl.searchParams.set("chat_id", chatId);
     apiUrl.searchParams.set("from", fromISO);
     apiUrl.searchParams.set("to", toISO);
 
@@ -67,6 +70,7 @@ export default async function Dashboard({ searchParams }) {
       <form className="mt-6 flex flex-wrap items-end gap-4" method="get">
         <input type="hidden" name="token" value={token} />
         <input type="hidden" name="chat_id" value={chatId} />
+        <input type="hidden" name="link_token" value={linkToken} />
         <label className="flex flex-col gap-1 text-sm">
           Desde
           <input
@@ -93,9 +97,9 @@ export default async function Dashboard({ searchParams }) {
         </button>
       </form>
 
-      {!token || !chatId ? (
+      {!linkToken && (!token || !chatId) ? (
         <div className="mt-6 rounded border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-          Agrega <strong>token</strong> y <strong>chat_id</strong> en la URL para ver el dashboard.
+          Abre este dashboard desde el bot usando <strong>/dashboard</strong>.
         </div>
       ) : null}
 
