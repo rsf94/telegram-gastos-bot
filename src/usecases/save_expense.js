@@ -3,7 +3,8 @@ import { LLM_PROVIDER } from "../config.js";
 import {
   insertExpenseAndMaybeInstallments,
   updateExpenseEnrichment,
-  enqueueEnrichmentRetry
+  enqueueEnrichmentRetry,
+  getActiveTripId
 } from "../storage/bigquery.js";
 import { escapeHtml, tgSend } from "../telegram.js";
 import { enrichExpenseLLM } from "../gemini.js";
@@ -78,7 +79,8 @@ export async function saveExpense({
   updateExpenseEnrichmentFn = updateExpenseEnrichment,
   enqueueEnrichmentRetryFn = enqueueEnrichmentRetry,
   enrichExpenseLLMFn = enrichExpenseLLM,
-  llmProviderEnv = LLM_PROVIDER
+  llmProviderEnv = LLM_PROVIDER,
+  getActiveTripIdFn = getActiveTripId
 }) {
   const perf = draft.__perf || {};
   const parseMs = Number(perf.parse_ms || 0);
@@ -113,7 +115,26 @@ export async function saveExpense({
     }
 
     setIdempotencyPending(idempotencyKey);
-    const expenseId = await insertExpense(draft, chatId);
+
+    let activeTripId = null;
+    try {
+      activeTripId = await getActiveTripIdFn(chatId);
+    } catch (tripError) {
+      logPerf(
+        {
+          request_id: requestId,
+          flow: "trip",
+          option: "GET_ACTIVE_TRIP",
+          chat_id: chatId,
+          err_short: shortError(tripError),
+          status: "error"
+        },
+        "warn"
+      );
+    }
+
+    const draftWithTrip = activeTripId ? { ...draft, trip_id: activeTripId } : draft;
+    const expenseId = await insertExpense(draftWithTrip, chatId);
     setIdempotencySaved(idempotencyKey, expenseId);
     const bqInsertMs = Date.now() - bqStart;
     await sendMessage(

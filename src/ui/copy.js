@@ -26,7 +26,8 @@ export function helpText() {
     "",
     "🧹 <b>Cancelar</b>: escribe <b>cancelar</b>.",
     "🗑️ <b>Borrar</b>: /borrar <code>&lt;expense_id&gt;</code>",
-    "📊 <b>Análisis</b>: /analisis"
+    "📊 <b>Análisis</b>: /analisis",
+    "✈️ <b>Viajes</b>: /viaje nuevo | /viaje listar | /viaje actual"
   ].join("\n");
 }
 
