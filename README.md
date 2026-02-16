@@ -48,7 +48,7 @@ El bot mostrará un preview y pedirá confirmación.
 - `/cuentas` → lista cuentas de débito/efectivo (crea “Efectivo” si no existe)
 - `/alta_cuenta Nombre | Institución | Tipo` → registra cuenta (tipo: `DEBIT` o `CASH`)
 - `/mov ...` → registra movimientos de efectivo/débito (retiro, depósito, transfer)
-- `/dashboard` → genera URL de vinculación. Run /dashboard to get a linking URL. Open it while logged in.
+- `/dashboard` → genera URL con `link_token` para vincular identidad web↔Telegram (append-only).
 - `/viaje nuevo [nombre]` → crea viaje y lo deja activo para ese chat
 - `/viaje listar` → muestra los últimos 10 viajes del chat
 - `/viaje usar <trip_id>` → cambia el viaje activo (acepta id completo o prefijo)
@@ -123,6 +123,7 @@ Configura estas env vars en Cloud Run:
 - `BQ_TABLE` → tabla principal (ej. `expenses`)
 - `DASHBOARD_BASE_URL` → URL base de corte-web (ej. `https://corte-web.example`)
 - `LINK_TOKEN_SECRET` → secreto para firmar link tokens de vinculación
+- (web/proxy) header autenticado `x-user-email` o `x-goog-authenticated-user-email` para resolver identidad
 
 ### LLM (recomendado)
 - `GEMINI_API_KEY` → habilita enriquecimiento con Gemini
@@ -183,6 +184,8 @@ Tablas nuevas para viajes:
 
 Tablas auxiliares:
 
+- `users` → identidad de usuario por email (append-only en creación)
+- `chat_links` → vínculo append-only de `user_id` con `chat_id`
 - `installments` → agenda de MSI (ver `src/installments_tables.sql`)
 - `card_rules` → reglas de corte/pago por tarjeta (para análisis y recordatorios)
 - `reminder_log` → evita duplicar recordatorios
