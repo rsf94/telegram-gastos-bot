@@ -28,7 +28,10 @@ import {
   getPendingDelete,
   setPendingDelete,
   setLastExpenseId,
-  setLedgerDraft
+  setLedgerDraft,
+  getTripDraft,
+  setTripDraft,
+  clearTripDraft
 } from "../state.js";
 import {
   getExpenseById,
@@ -229,6 +232,14 @@ function normalizeTripName(name) {
   return `Viaje ${new Date().toISOString().slice(0, 10)}`;
 }
 
+function normalizeTripBaseCurrency(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function isIsoCurrencyCode(value) {
+  return /^[A-Z]{3}$/.test(normalizeTripBaseCurrency(value));
+}
+
 function findTripByIdOrPrefix(trips, query) {
   const value = String(query || "").trim().toLowerCase();
   if (!value) return null;
@@ -306,6 +317,40 @@ export function createMessageHandler({
         option = "command:cancel";
         clearAll(chatId);
         await sendMessage(chatId, "🧹 <b>Cancelado</b>.");
+        return;
+      }
+
+      const pendingTripDraft = getTripDraft(chatId);
+      if (pendingTripDraft?.__state === "awaiting_base_currency") {
+        option = "trip:awaiting_base_currency";
+        const code = normalizeTripBaseCurrency(text);
+        if (!isIsoCurrencyCode(code)) {
+          await sendMessage(
+            chatId,
+            "Código inválido. Escribe una moneda ISO de 3 letras (ej. <code>JPY</code>, <code>USD</code>, <code>EUR</code>)."
+          );
+          return;
+        }
+
+        const trip = await createTripFn({
+          chat_id: chatId,
+          name: pendingTripDraft.name,
+          base_currency: code
+        });
+        await setActiveTripFn({ chat_id: chatId, trip_id: trip.trip_id });
+        setActiveTripCache(chatId, {
+          tripId: trip.trip_id,
+          tripName: trip.name,
+          baseCurrency: code
+        });
+        clearTripDraft(chatId);
+
+        await sendMessage(
+          chatId,
+          `✈️ Viaje activo: <b>${escapeHtml(trip.name)}</b>
+ID: <code>${escapeHtml(trip.trip_id)}</code>
+Moneda base: <b>${escapeHtml(code)}</b>`
+        );
         return;
       }
 
@@ -685,15 +730,13 @@ export function createMessageHandler({
 
         if (subcommand === "nuevo") {
           const tripName = normalizeTripName(restText);
-          const trip = await createTripFn({ chat_id: chatId, name: tripName });
-          await setActiveTripFn({ chat_id: chatId, trip_id: trip.trip_id });
-          setActiveTripCache(chatId, { tripId: trip.trip_id, tripName: trip.name });
+          setTripDraft(chatId, {
+            __state: "awaiting_base_currency",
+            name: tripName
+          });
           await sendMessage(
             chatId,
-            `✈️ Viaje activo: <b>${escapeHtml(trip.name)}</b>
-ID: <code>${escapeHtml(
-              trip.trip_id
-            )}</code>`
+            "¿En qué moneda quieres llevar este viaje?\nEscribe el código ISO (ej. JPY, USD, EUR, MXN)"
           );
           return;
         }
@@ -730,7 +773,11 @@ ID: <code>${escapeHtml(
           }
 
           await setActiveTripFn({ chat_id: chatId, trip_id: trip.trip_id });
-          setActiveTripCache(chatId, { tripId: trip.trip_id, tripName: trip.name || "Viaje" });
+          setActiveTripCache(chatId, {
+            tripId: trip.trip_id,
+            tripName: trip.name || "Viaje",
+            baseCurrency: trip.base_currency || null
+          });
           await sendMessage(
             chatId,
             `✅ Viaje activo actualizado a <b>${escapeHtml(trip.name || "Viaje")}</b> (<code>${escapeHtml(
@@ -743,7 +790,7 @@ ID: <code>${escapeHtml(
         if (subcommand === "actual") {
           const activeTripId = await getActiveTripIdFn(chatId);
           if (!activeTripId) {
-            setActiveTripCache(chatId, { tripId: null, tripName: null });
+            setActiveTripCache(chatId, { tripId: null, tripName: null, baseCurrency: null });
             await sendMessage(chatId, "No hay viaje activo. Usa <code>/viaje nuevo</code> o <code>/viaje usar</code>.");
             return;
           }
@@ -751,25 +798,30 @@ ID: <code>${escapeHtml(
           const trips = await listTripsFn(chatId, 100);
           const trip = findTripByIdOrPrefix(trips, activeTripId);
           if (!trip) {
-            setActiveTripCache(chatId, { tripId: activeTripId, tripName: null });
+            setActiveTripCache(chatId, { tripId: activeTripId, tripName: null, baseCurrency: null });
             await sendMessage(chatId, `Viaje activo: <code>${escapeHtml(activeTripId)}</code>`);
             return;
           }
 
-          setActiveTripCache(chatId, { tripId: trip.trip_id, tripName: trip.name || "Viaje" });
+          setActiveTripCache(chatId, {
+            tripId: trip.trip_id,
+            tripName: trip.name || "Viaje",
+            baseCurrency: trip.base_currency || null
+          });
+          const baseCurrency = trip.base_currency ? `\nMoneda base: <b>${escapeHtml(trip.base_currency)}</b>` : "";
           await sendMessage(
             chatId,
             `🎯 Viaje activo: <b>${escapeHtml(trip.name || "Viaje")}</b>
 ID: <code>${escapeHtml(
               trip.trip_id
-            )}</code>`
+            )}</code>${baseCurrency}`
           );
           return;
         }
 
         if (["apagar", "off", "none"].includes(subcommand)) {
           await setActiveTripFn({ chat_id: chatId, trip_id: null });
-          setActiveTripCache(chatId, { tripId: null, tripName: null });
+          setActiveTripCache(chatId, { tripId: null, tripName: null, baseCurrency: null });
           await sendMessage(
             chatId,
             "✅ Viaje activo apagado. Los próximos gastos no se asignarán a ningún viaje."
@@ -989,10 +1041,20 @@ ID: <code>${escapeHtml(
       draft.category = guessCategory(`${draft.merchant} ${draft.description}`);
 
       const cachedActiveTrip = getActiveTripCache(chatId);
+      const activeTripBaseCurrency = cachedActiveTrip?.baseCurrency || null;
       draft.active_trip_id = cachedActiveTrip?.tripId || null;
       draft.active_trip_name = cachedActiveTrip?.tripName || null;
+      draft.active_trip_base_currency = activeTripBaseCurrency;
       draft.trip_id = cachedActiveTrip?.tripId || null;
       draft.trip_name = cachedActiveTrip?.tripName || null;
+
+      if (draft.currency_explicit === false) {
+        if (draft.trip_id && activeTripBaseCurrency) {
+          draft.currency = activeTripBaseCurrency;
+        } else {
+          draft.currency = "MXN";
+        }
+      }
 
       const err = validateDraft(draft, { skipPaymentMethod: true });
       if (err) {

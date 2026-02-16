@@ -2,6 +2,7 @@ const draftByChat = new Map(); // chatId -> draft
 const deleteByChat = new Map(); // chatId -> { expenseId, installmentsCount }
 const lastExpenseByChat = new Map(); // chatId -> expenseId
 const ledgerDraftByChat = new Map(); // chatId -> ledger draft
+const tripDraftByChat = new Map(); // chatId -> pending trip creation draft
 
 export function getDraft(chatId) {
   return draftByChat.get(chatId);
@@ -13,6 +14,18 @@ export function setDraft(chatId, draft) {
 
 export function clearDraft(chatId) {
   draftByChat.delete(chatId);
+}
+
+export function getTripDraft(chatId) {
+  return tripDraftByChat.get(chatId);
+}
+
+export function setTripDraft(chatId, draft) {
+  tripDraftByChat.set(chatId, draft);
+}
+
+export function clearTripDraft(chatId) {
+  tripDraftByChat.delete(chatId);
 }
 
 export function getLedgerDraft(chatId) {
@@ -57,6 +70,7 @@ export function clearAll(chatId) {
   clearPendingDelete(chatId);
   clearLastExpenseId(chatId);
   clearLedgerDraft(chatId);
+  clearTripDraft(chatId);
 }
 
 export function __resetState() {
@@ -64,4 +78,5 @@ export function __resetState() {
   deleteByChat.clear();
   lastExpenseByChat.clear();
   ledgerDraftByChat.clear();
+  tripDraftByChat.clear();
 }

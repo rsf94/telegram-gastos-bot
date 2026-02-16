@@ -57,18 +57,56 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
-function formatMoneyMXN(n) {
-  const x = Number(n || 0);
-  return x.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
+function formatAmountWithCurrency(amount, currency = "MXN") {
+  return `${Number(amount || 0)} ${String(currency || "MXN").toUpperCase()}`;
+}
+
+const DEFAULT_SUPPORTED_CURRENCIES = new Set([
+  "MXN",
+  "USD",
+  "EUR",
+  "JPY",
+  "GBP",
+  "CAD",
+  "AUD",
+  "CHF",
+  "BRL",
+  "COP",
+  "ARS",
+  "CLP",
+  "PEN"
+]);
+
+function buildSupportedCurrenciesSet() {
+  const intlFn = Intl?.supportedValuesOf;
+  if (typeof intlFn !== "function") return DEFAULT_SUPPORTED_CURRENCIES;
+
+  try {
+    const currencies = intlFn("currency")
+      .map((code) => String(code || "").toUpperCase())
+      .filter((code) => /^[A-Z]{3}$/.test(code));
+    return currencies.length ? new Set(currencies) : DEFAULT_SUPPORTED_CURRENCIES;
+  } catch (_) {
+    return DEFAULT_SUPPORTED_CURRENCIES;
+  }
+}
+
+const SUPPORTED_CURRENCIES = buildSupportedCurrenciesSet();
+
+function extractCurrencyCode(text) {
+  const tokens = String(text || "").match(/\b[A-Za-z]{3}\b/g) || [];
+  for (const token of tokens) {
+    const upper = token.toUpperCase();
+    if (upper === "MSI") continue;
+    if (SUPPORTED_CURRENCIES.has(upper)) {
+      return upper;
+    }
+  }
+  return null;
 }
 
 function formatDraftAmount(draft) {
-  const amount = Number(draft?.amount_mxn || 0);
-  const currency = String(draft?.currency || "MXN").toUpperCase();
-  if (currency !== "MXN") {
-    return `${amount} ${currency}`;
-  }
-  return formatMoneyMXN(amount);
+  return formatAmountWithCurrency(draft?.amount_mxn, draft?.currency || "MXN");
 }
 
 function tripShortId(tripId) {
@@ -296,9 +334,12 @@ export function localParseExpense(text) {
   }
 
   const msi_total_amount = is_msi && Number.isFinite(amount_mxn) ? amount_mxn : null;
+  const parsedCurrency = extractCurrencyCode(raw);
 
   return {
     amount_mxn,
+    currency: parsedCurrency || "MXN",
+    currency_explicit: Boolean(parsedCurrency),
     payment_method,
     category: "Other",
     purchase_date,
@@ -324,6 +365,7 @@ export function localParseExpense(text) {
  * - sigue simple, pero detecta "msi" básico
  * ======================= */
 export function naiveParse(text) {
+  const parsedCurrency = extractCurrencyCode(text);
   const m = text.match(/(\d+(\.\d+)?)/);
   const amount = m ? Number(m[1]) : NaN;
 
@@ -361,6 +403,8 @@ export function naiveParse(text) {
 
   return {
     amount_mxn: monthly,
+    currency: parsedCurrency || "MXN",
+    currency_explicit: Boolean(parsedCurrency),
     payment_method: pm,
     category,
     purchase_date: d || today,
@@ -442,9 +486,10 @@ export function paymentMethodPreview(d) {
   if (isMsi) {
     const total = Number(d.msi_total_amount || 0);
     const months = d.msi_months != null ? Number(d.msi_months) : null;
+    const currency = d?.currency || "MXN";
 
     lines.push(`MSI: <b>sí</b>`);
-    lines.push(`Total compra: <b>${escapeHtml(formatMoneyMXN(total))}</b>`);
+    lines.push(`Total compra: <b>${escapeHtml(formatAmountWithCurrency(total, currency))}</b>`);
     if (!months || !Number.isFinite(months) || months <= 1) {
       lines.push(`Meses: <b>❓ (falta)</b>`);
     } else {
@@ -474,9 +519,10 @@ export function preview(d) {
   if (isMsi) {
     const total = Number(d.msi_total_amount || 0);
     const months = d.msi_months != null ? Number(d.msi_months) : null;
+    const currency = d?.currency || "MXN";
 
     lines.push(`Tipo: <b>MSI</b>`);
-    lines.push(`Total compra: <b>${escapeHtml(formatMoneyMXN(total))}</b>`);
+    lines.push(`Total compra: <b>${escapeHtml(formatAmountWithCurrency(total, currency))}</b>`);
 
     if (!months || !Number.isFinite(months) || months <= 1) {
       lines.push(`Meses: <b>❓ (falta)</b>`);
@@ -486,7 +532,7 @@ export function preview(d) {
         ? Number(d.amount_mxn)
         : round2(total / months);
       lines.push(`Meses: <b>${escapeHtml(String(months))}</b>`);
-      lines.push(`Mensualidad aprox: <b>${escapeHtml(formatMoneyMXN(monthly))}</b>`);
+      lines.push(`Mensualidad aprox: <b>${escapeHtml(formatAmountWithCurrency(monthly, currency))}</b>`);
     }
 
     const sm = d.msi_start_month;

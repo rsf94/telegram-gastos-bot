@@ -268,9 +268,15 @@ export function createCallbackHandler({
         if (data === "trip_exclude") {
           draft.trip_id = null;
           draft.trip_name = null;
+          if (draft.currency_explicit === false) {
+            draft.currency = "MXN";
+          }
         } else {
           draft.trip_id = draft.active_trip_id || null;
           draft.trip_name = draft.active_trip_name || null;
+          if (draft.currency_explicit === false) {
+            draft.currency = draft.active_trip_base_currency || "MXN";
+          }
         }
 
         setDraft(chatId, draft);

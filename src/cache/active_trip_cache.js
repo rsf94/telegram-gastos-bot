@@ -9,10 +9,11 @@ function normalizeTripId(value) {
   return String(value);
 }
 
-export function setActiveTripCache(chatId, { tripId = null, tripName = null, ts = Date.now() } = {}) {
+export function setActiveTripCache(chatId, { tripId = null, tripName = null, baseCurrency = null, ts = Date.now() } = {}) {
   activeTripCache.set(String(chatId), {
     tripId: normalizeTripId(tripId),
     tripName: tripName == null ? null : String(tripName),
+    baseCurrency: baseCurrency == null ? null : String(baseCurrency).toUpperCase(),
     ts: Number(ts) || Date.now()
   });
 }

@@ -1322,7 +1322,10 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     is_msi: isMsi,
     msi_months: isMsi ? msiMonths : null,
     msi_start_month: isMsi ? normalizeDateISO(billingMonthISO) : null, // primer billing month (mes B)
-    msi_total_amount: isMsi ? money2(msiTotal) : null
+    msi_total_amount: isMsi ? money2(msiTotal) : null,
+    original_amount: isMsi ? money2(msiTotal) : money2(draft.amount_mxn),
+    original_currency: String(draft.currency || "MXN").toUpperCase(),
+    amount_mxn_source: "manual"
   };
 
   if (draft.trip_id) {
