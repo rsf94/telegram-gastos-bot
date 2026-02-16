@@ -46,7 +46,7 @@ import {
 import { createLinkToken } from "../linking.js";
 import { getActiveCardRules } from "../cache/card_rules_cache.js";
 import { saveExpense } from "../usecases/save_expense.js";
-import { resolveActiveTripForChat } from "../usecases/resolve_active_trip.js";
+import { getActiveTripCache, setActiveTripCache } from "../cache/active_trip_cache.js";
 import { helpText, welcomeText } from "../ui/copy.js";
 import { buildUpcomingPaymentsReport } from "../payments.js";
 import {
@@ -154,6 +154,30 @@ function logPerf(payload, level = "log") {
   }
 }
 
+function logExpenseDraftPerf({ requestId, chatId, msTotal, msParse, msUiRender, msAnyBq = 0, msFx = 0 }) {
+  logPerf({
+    request_id: requestId || null,
+    flow: "expense_draft",
+    chat_id: String(chatId),
+    ms_total: msTotal,
+    ms_parse: msParse,
+    ms_ui_render: msUiRender,
+    ms_any_bq: msAnyBq || 0,
+    ms_fx: msFx || 0
+  });
+
+  if (msTotal > 1500) {
+    console.warn(
+      JSON.stringify({
+        type: "slow_path",
+        flow: "expense_draft",
+        chat_id: String(chatId),
+        ms_total: msTotal
+      })
+    );
+  }
+}
+
 function base64UrlEncode(value) {
   return Buffer.from(value)
     .toString("base64")
@@ -234,7 +258,6 @@ export function createMessageHandler({
   setActiveTripFn = setActiveTrip,
   getActiveTripIdFn = getActiveTripId,
   listTripsFn = listTrips,
-  resolveActiveTripForChatFn = resolveActiveTripForChat,
   handleAnalysisCommand
 } = {}) {
   return async function handleMessage(msg, { requestId } = {}) {
@@ -654,7 +677,8 @@ export function createMessageHandler({
               "• <code>/viaje nuevo [nombre]</code>\n" +
               "• <code>/viaje listar</code>\n" +
               "• <code>/viaje usar &lt;trip_id&gt;</code>\n" +
-              "• <code>/viaje actual</code>"
+              "• <code>/viaje actual</code>\n" +
+              "• <code>/viaje apagar</code>"
           );
           return;
         }
@@ -663,9 +687,11 @@ export function createMessageHandler({
           const tripName = normalizeTripName(restText);
           const trip = await createTripFn({ chat_id: chatId, name: tripName });
           await setActiveTripFn({ chat_id: chatId, trip_id: trip.trip_id });
+          setActiveTripCache(chatId, { tripId: trip.trip_id, tripName: trip.name });
           await sendMessage(
             chatId,
-            `✈️ Viaje activo: <b>${escapeHtml(trip.name)}</b>\nID: <code>${escapeHtml(
+            `✈️ Viaje activo: <b>${escapeHtml(trip.name)}</b>
+ID: <code>${escapeHtml(
               trip.trip_id
             )}</code>`
           );
@@ -704,6 +730,7 @@ export function createMessageHandler({
           }
 
           await setActiveTripFn({ chat_id: chatId, trip_id: trip.trip_id });
+          setActiveTripCache(chatId, { tripId: trip.trip_id, tripName: trip.name || "Viaje" });
           await sendMessage(
             chatId,
             `✅ Viaje activo actualizado a <b>${escapeHtml(trip.name || "Viaje")}</b> (<code>${escapeHtml(
@@ -716,6 +743,7 @@ export function createMessageHandler({
         if (subcommand === "actual") {
           const activeTripId = await getActiveTripIdFn(chatId);
           if (!activeTripId) {
+            setActiveTripCache(chatId, { tripId: null, tripName: null });
             await sendMessage(chatId, "No hay viaje activo. Usa <code>/viaje nuevo</code> o <code>/viaje usar</code>.");
             return;
           }
@@ -723,15 +751,28 @@ export function createMessageHandler({
           const trips = await listTripsFn(chatId, 100);
           const trip = findTripByIdOrPrefix(trips, activeTripId);
           if (!trip) {
+            setActiveTripCache(chatId, { tripId: activeTripId, tripName: null });
             await sendMessage(chatId, `Viaje activo: <code>${escapeHtml(activeTripId)}</code>`);
             return;
           }
 
+          setActiveTripCache(chatId, { tripId: trip.trip_id, tripName: trip.name || "Viaje" });
           await sendMessage(
             chatId,
-            `🎯 Viaje activo: <b>${escapeHtml(trip.name || "Viaje")}</b>\nID: <code>${escapeHtml(
+            `🎯 Viaje activo: <b>${escapeHtml(trip.name || "Viaje")}</b>
+ID: <code>${escapeHtml(
               trip.trip_id
             )}</code>`
+          );
+          return;
+        }
+
+        if (["apagar", "off", "none"].includes(subcommand)) {
+          await setActiveTripFn({ chat_id: chatId, trip_id: null });
+          setActiveTripCache(chatId, { tripId: null, tripName: null });
+          await sendMessage(
+            chatId,
+            "✅ Viaje activo apagado. Los próximos gastos no se asignarán a ningún viaje."
           );
           return;
         }
@@ -897,6 +938,8 @@ export function createMessageHandler({
       // =========================
       // Detecta si es MSI (FLUJO B) o normal (FLUJO C)
       // =========================
+      const draftFlowStart = Date.now();
+      let draftAnyBqMs = 0;
       const localParseStart = Date.now();
       let draft = localParseExpense(text);
       const localParseMs = Date.now() - localParseStart;
@@ -945,13 +988,11 @@ export function createMessageHandler({
       draft.merchant = guessMerchant(text) || "";
       draft.category = guessCategory(`${draft.merchant} ${draft.description}`);
 
-      const activeTrip = await resolveActiveTripForChatFn(chatId, {
-        getActiveTripIdFn
-      });
-      draft.active_trip_id = activeTrip?.trip_id || null;
-      draft.active_trip_name = activeTrip?.trip_name || null;
-      draft.trip_id = activeTrip?.trip_id || null;
-      draft.trip_name = activeTrip?.trip_name || null;
+      const cachedActiveTrip = getActiveTripCache(chatId);
+      draft.active_trip_id = cachedActiveTrip?.tripId || null;
+      draft.active_trip_name = cachedActiveTrip?.tripName || null;
+      draft.trip_id = cachedActiveTrip?.tripId || null;
+      draft.trip_name = cachedActiveTrip?.tripName || null;
 
       const err = validateDraft(draft, { skipPaymentMethod: true });
       if (err) {
@@ -977,11 +1018,23 @@ export function createMessageHandler({
           draft.__state = "awaiting_payment_method";
 
           setDraft(chatId, draft);
+          const cardLookupStart = Date.now();
           const activeCards = await getActiveCardNamesFn(chatId);
+          draftAnyBqMs += Date.now() - cardLookupStart;
           const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
 
+          const uiRenderStart = Date.now();
           await sendMessage(chatId, paymentMethodPreview(draft), {
             reply_markup: paymentMethodKeyboardFn(paymentMethods)
+          });
+          const uiRenderMs = Date.now() - uiRenderStart;
+          logExpenseDraftPerf({
+            requestId,
+            chatId,
+            msTotal: Date.now() - draftFlowStart,
+            msParse: localParseMs,
+            msUiRender: uiRenderMs,
+            msAnyBq: draftAnyBqMs
           });
           return;
         }
@@ -990,11 +1043,23 @@ export function createMessageHandler({
         draft.__state = "awaiting_payment_method";
 
         setDraft(chatId, draft);
+        const cardLookupStart = Date.now();
         const activeCards = await getActiveCardNamesFn(chatId);
+        draftAnyBqMs += Date.now() - cardLookupStart;
         const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
 
+        const uiRenderStart = Date.now();
         await sendMessage(chatId, paymentMethodPreview(draft), {
           reply_markup: paymentMethodKeyboardFn(paymentMethods)
+        });
+        const uiRenderMs = Date.now() - uiRenderStart;
+        logExpenseDraftPerf({
+          requestId,
+          chatId,
+          msTotal: Date.now() - draftFlowStart,
+          msParse: localParseMs,
+          msUiRender: uiRenderMs,
+          msAnyBq: draftAnyBqMs
         });
         return;
       }
@@ -1010,10 +1075,22 @@ export function createMessageHandler({
 
       draft.__state = "awaiting_payment_method";
       setDraft(chatId, draft);
+      const cardLookupStart = Date.now();
       const activeCards = await getActiveCardNamesFn(chatId);
+      draftAnyBqMs += Date.now() - cardLookupStart;
       const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
+      const uiRenderStart = Date.now();
       await sendMessage(chatId, paymentMethodPreview(draft), {
         reply_markup: paymentMethodKeyboardFn(paymentMethods)
+      });
+      const uiRenderMs = Date.now() - uiRenderStart;
+      logExpenseDraftPerf({
+        requestId,
+        chatId,
+        msTotal: Date.now() - draftFlowStart,
+        msParse: localParseMs,
+        msUiRender: uiRenderMs,
+        msAnyBq: draftAnyBqMs
       });
     } catch (error) {
       status = "error";

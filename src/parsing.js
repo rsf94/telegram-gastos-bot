@@ -84,7 +84,8 @@ function formatTripLabel(draft) {
   const hasActiveTrip = Boolean(String(draft?.active_trip_id || "").trim());
 
   if (hasActiveTrip && !tripId) {
-    return activeTripName || "Viaje activo";
+    const label = activeTripName || "Viaje activo";
+    return `${label} (excluido)`;
   }
   if (tripName && tripId) return `${tripName} (${tripShortId(tripId)}…)`;
   if (tripName) return tripName;
