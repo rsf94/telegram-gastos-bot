@@ -49,6 +49,10 @@ El bot mostrará un preview y pedirá confirmación.
 - `/alta_cuenta Nombre | Institución | Tipo` → registra cuenta (tipo: `DEBIT` o `CASH`)
 - `/mov ...` → registra movimientos de efectivo/débito (retiro, depósito, transfer)
 - `/dashboard` → genera URL de vinculación. Run /dashboard to get a linking URL. Open it while logged in.
+- `/viaje nuevo [nombre]` → crea viaje y lo deja activo para ese chat
+- `/viaje listar` → muestra los últimos 10 viajes del chat
+- `/viaje usar <trip_id>` → cambia el viaje activo (acepta id completo o prefijo)
+- `/viaje actual` → muestra el viaje activo
 
 #### Ledger (efectivo / débito)
 
@@ -164,6 +168,18 @@ Campos (sugerido):
 - `msi_months` INT64
 - `msi_start_month` DATE
 - `msi_total_amount` NUMERIC
+- `trip_id` STRING (nullable, para asociar gasto a viaje activo)
+- `original_amount` NUMERIC (nullable, reservado para FX)
+- `original_currency` STRING (nullable, reservado para FX)
+- `fx_rate` NUMERIC (nullable, reservado para FX)
+- `fx_provider` STRING (nullable, reservado para FX)
+- `fx_date` DATE (nullable, reservado para FX)
+- `amount_mxn_source` STRING (nullable, reservado para FX)
+
+Tablas nuevas para viajes:
+
+- `trips` → catálogo de viajes por chat
+- `trip_state` → estado append-only del viaje activo por chat
 
 Tablas auxiliares:
 
@@ -337,3 +353,22 @@ npm run web:dev
 ```
 
 Más detalles y variables de entorno en `web/README.md`.
+
+## ✈️ Migraciones: Trips (viajes)
+
+Ejecuta estas queries en BigQuery Console (en orden):
+
+1. `docs/migrations/001_create_trips.sql`
+2. `docs/migrations/002_create_trip_state.sql`
+3. `docs/migrations/003_alter_expenses_add_trip_columns.sql`
+
+Notas:
+- `trip_state` es append-only (sin UPDATE/DELETE) para evitar problemas con streaming buffer.
+- `expenses.trip_id` se llena automáticamente cuando el chat tiene viaje activo; si no hay viaje activo se guarda `NULL`.
+- No se requiere backfill de gastos históricos.
+
+Comandos en Telegram:
+- `/viaje nuevo [nombre]`
+- `/viaje listar`
+- `/viaje usar <trip_id>`
+- `/viaje actual`

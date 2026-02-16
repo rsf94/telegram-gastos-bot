@@ -37,7 +37,11 @@ import {
   getBillingMonthForPurchase,
   listAccounts,
   createAccount,
-  insertPendingUserLink
+  insertPendingUserLink,
+  createTrip,
+  setActiveTrip,
+  getActiveTripId,
+  listTrips
 } from "../storage/bigquery.js";
 import { createLinkToken } from "../linking.js";
 import { getActiveCardRules } from "../cache/card_rules_cache.js";
@@ -190,6 +194,27 @@ function monthOffset(baseDate, delta) {
   return `${yyyy}-${mm}`;
 }
 
+function tripIdShort(tripId) {
+  return String(tripId || "").slice(0, 8);
+}
+
+function normalizeTripName(name) {
+  const clean = String(name || "").trim();
+  if (clean) return clean;
+  return `Viaje ${new Date().toISOString().slice(0, 10)}`;
+}
+
+function findTripByIdOrPrefix(trips, query) {
+  const value = String(query || "").trim().toLowerCase();
+  if (!value) return null;
+  const exact = trips.find((trip) => String(trip.trip_id).toLowerCase() === value);
+  if (exact) return exact;
+
+  const matches = trips.filter((trip) => String(trip.trip_id).toLowerCase().startsWith(value));
+  if (matches.length === 1) return matches[0];
+  return null;
+}
+
 export function createMessageHandler({
   sendMessage = tgSend,
   deleteConfirmKeyboardFn = deleteConfirmKeyboard,
@@ -204,6 +229,10 @@ export function createMessageHandler({
   listAccountsFn = listAccounts,
   createAccountFn = createAccount,
   insertPendingUserLinkFn = insertPendingUserLink,
+  createTripFn = createTrip,
+  setActiveTripFn = setActiveTrip,
+  getActiveTripIdFn = getActiveTripId,
+  listTripsFn = listTrips,
   handleAnalysisCommand
 } = {}) {
   return async function handleMessage(msg, { requestId } = {}) {
@@ -605,6 +634,107 @@ export function createMessageHandler({
           total_ms: Date.now() - ledgerStart,
           status: "ok"
         });
+        return;
+      }
+
+      const tripCommandMatch = text.match(/^\/(viaje|trip)(?:@\S+)?(?:\s+(.+))?$/i);
+      if (tripCommandMatch) {
+        option = "command:trip";
+        const argsText = String(tripCommandMatch[2] || "").trim();
+        const [rawSubcommand, ...rawRest] = argsText.split(/\s+/).filter(Boolean);
+        const subcommand = String(rawSubcommand || "").toLowerCase();
+        const restText = rawRest.join(" ").trim();
+
+        if (!subcommand) {
+          await sendMessage(
+            chatId,
+            "Uso:\n" +
+              "• <code>/viaje nuevo [nombre]</code>\n" +
+              "• <code>/viaje listar</code>\n" +
+              "• <code>/viaje usar &lt;trip_id&gt;</code>\n" +
+              "• <code>/viaje actual</code>"
+          );
+          return;
+        }
+
+        if (subcommand === "nuevo") {
+          const tripName = normalizeTripName(restText);
+          const trip = await createTripFn({ chat_id: chatId, name: tripName });
+          await setActiveTripFn({ chat_id: chatId, trip_id: trip.trip_id });
+          await sendMessage(
+            chatId,
+            `✈️ Viaje activo: <b>${escapeHtml(trip.name)}</b>\nID: <code>${escapeHtml(
+              trip.trip_id
+            )}</code>`
+          );
+          return;
+        }
+
+        if (subcommand === "listar") {
+          const trips = await listTripsFn(chatId, 10);
+          if (!trips.length) {
+            await sendMessage(chatId, "No tienes viajes aún. Crea uno con <code>/viaje nuevo</code>.");
+            return;
+          }
+
+          const lines = trips.map((trip, index) => {
+            const currency = trip.base_currency ? ` · ${escapeHtml(trip.base_currency)}` : "";
+            return `${index + 1}. <b>${escapeHtml(trip.name || "Viaje")}</b> (<code>${escapeHtml(
+              tripIdShort(trip.trip_id)
+            )}</code>)${currency}`;
+          });
+
+          await sendMessage(chatId, ["✈️ <b>Viajes recientes</b>", ...lines].join("\n"));
+          return;
+        }
+
+        if (subcommand === "usar") {
+          if (!restText) {
+            await sendMessage(chatId, "Indica el trip_id. Ejemplo: <code>/viaje usar 123e4567</code>");
+            return;
+          }
+
+          const trips = await listTripsFn(chatId, 100);
+          const trip = findTripByIdOrPrefix(trips, restText);
+          if (!trip) {
+            await sendMessage(chatId, "No encontré ese viaje en este chat.");
+            return;
+          }
+
+          await setActiveTripFn({ chat_id: chatId, trip_id: trip.trip_id });
+          await sendMessage(
+            chatId,
+            `✅ Viaje activo actualizado a <b>${escapeHtml(trip.name || "Viaje")}</b> (<code>${escapeHtml(
+              trip.trip_id
+            )}</code>).`
+          );
+          return;
+        }
+
+        if (subcommand === "actual") {
+          const activeTripId = await getActiveTripIdFn(chatId);
+          if (!activeTripId) {
+            await sendMessage(chatId, "No hay viaje activo. Usa <code>/viaje nuevo</code> o <code>/viaje usar</code>.");
+            return;
+          }
+
+          const trips = await listTripsFn(chatId, 100);
+          const trip = findTripByIdOrPrefix(trips, activeTripId);
+          if (!trip) {
+            await sendMessage(chatId, `Viaje activo: <code>${escapeHtml(activeTripId)}</code>`);
+            return;
+          }
+
+          await sendMessage(
+            chatId,
+            `🎯 Viaje activo: <b>${escapeHtml(trip.name || "Viaje")}</b>\nID: <code>${escapeHtml(
+              trip.trip_id
+            )}</code>`
+          );
+          return;
+        }
+
+        await sendMessage(chatId, "Subcomando no válido. Usa <code>/viaje listar</code> para ver opciones.");
         return;
       }
 

@@ -174,6 +174,111 @@ export function __setUserLinksTableForTests(table) {
   userLinksTableOverride = table;
 }
 
+function toMetadataValue(metadata) {
+  if (metadata === undefined || metadata === null) return null;
+  if (typeof metadata === "string") return metadata;
+  return JSON.stringify(metadata);
+}
+
+export async function createTrip({
+  chat_id,
+  name,
+  base_currency = null,
+  start_date = null,
+  end_date = null,
+  active = null,
+  metadata = null
+}, { tableClient } = {}) {
+  const table = tableClient || bq.dataset(BQ_DATASET).table("trips");
+  const nowISO = new Date().toISOString();
+  const row = {
+    trip_id: crypto.randomUUID(),
+    chat_id: String(chat_id),
+    name: String(name),
+    base_currency: base_currency ? String(base_currency) : null,
+    start_date: start_date || null,
+    end_date: end_date || null,
+    active: typeof active === "boolean" ? active : null,
+    created_at: nowISO,
+    updated_at: null,
+    metadata: toMetadataValue(metadata)
+  };
+
+  await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
+  return row;
+}
+
+export async function setActiveTrip({ chat_id, trip_id, metadata = null }, { tableClient } = {}) {
+  const table = tableClient || bq.dataset(BQ_DATASET).table("trip_state");
+  const row = {
+    chat_id: String(chat_id),
+    active_trip_id: String(trip_id),
+    set_at: new Date().toISOString(),
+    updated_at: null,
+    metadata: toMetadataValue(metadata)
+  };
+
+  await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
+  return row;
+}
+
+export async function getActiveTripId(chatId, { bigqueryClient } = {}) {
+  const query = `
+    SELECT active_trip_id
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.trip_state\`
+    WHERE chat_id = @chat_id
+    ORDER BY set_at DESC
+    LIMIT 1
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const client = bigqueryClient || bq;
+  const [job] = await client.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows?.[0]?.active_trip_id || null;
+}
+
+export async function listTrips(chatId, limit = 10, { bigqueryClient } = {}) {
+  const query = `
+    SELECT
+      trip_id,
+      chat_id,
+      name,
+      base_currency,
+      start_date,
+      end_date,
+      active,
+      created_at,
+      updated_at,
+      metadata
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.trips\`
+    WHERE chat_id = @chat_id
+    ORDER BY created_at DESC
+    LIMIT @limit
+  `;
+
+  const options = {
+    query,
+    params: {
+      chat_id: String(chatId),
+      limit: Number(limit)
+    },
+    parameterMode: "NAMED"
+  };
+
+  const client = bigqueryClient || bq;
+  const [job] = await client.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows || [];
+}
+
 /* =======================
  * Traer reglas activas de tarjetas
  * ======================= */
@@ -1178,6 +1283,10 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     msi_start_month: isMsi ? normalizeDateISO(billingMonthISO) : null, // primer billing month (mes B)
     msi_total_amount: isMsi ? money2(msiTotal) : null
   };
+
+  if (draft.trip_id) {
+    row.trip_id = String(draft.trip_id);
+  }
 
   await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
 
