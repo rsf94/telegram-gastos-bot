@@ -4,7 +4,6 @@ import {
   consumeLinkToken,
   ensureUserExists,
   getAuthenticatedEmail,
-  normalizeEmail,
   resolveLinkedChatId
 } from "./dashboard_identity.js";
 
@@ -35,7 +34,6 @@ function buildMonths(fromISO, toISO) {
 }
 
 async function fetchCardRules({ bq, env, chatId }) {
-  if (!chatId) return [];
   const dataset = requiredEnv(env, "BQ_DATASET");
   const query = `
     SELECT card_name, cut_day, pay_offset_days, roll_weekend_to_monday
@@ -58,7 +56,6 @@ async function fetchCardRules({ bq, env, chatId }) {
 }
 
 async function fetchNoMsiAggregates({ bq, env, chatId, fromISO, toISO }) {
-  if (!chatId) return [];
   const dataset = requiredEnv(env, "BQ_DATASET");
   const query = `
     SELECT payment_method AS card_name, purchase_date, SUM(amount_mxn) AS total
@@ -86,7 +83,6 @@ async function fetchNoMsiAggregates({ bq, env, chatId, fromISO, toISO }) {
 }
 
 async function fetchMsiAggregates({ bq, env, chatId, fromISO, toISO }) {
-  if (!chatId) return [];
   const dataset = requiredEnv(env, "BQ_DATASET");
   const query = `
     SELECT card_name, billing_month, SUM(amount_mxn) AS total
@@ -126,11 +122,13 @@ async function resolveAuthorizedChatId({ request, bq, env }) {
     if (!validateToken(env, legacyToken)) {
       throw new Error("Unauthorized");
     }
-    return { chatId: String(legacyChatId), userId: null };
+    return String(legacyChatId);
   }
 
   const email = getAuthenticatedEmail(request);
-  if (!email) throw new Error("Unauthorized");
+  if (!email) {
+    throw new Error("Missing authenticated user email");
+  }
 
   const projectId = requiredEnv(env, "BQ_PROJECT_ID");
   const dataset = requiredEnv(env, "BQ_DATASET");
@@ -149,53 +147,20 @@ async function resolveAuthorizedChatId({ request, bq, env }) {
     });
   }
 
-  const fallbackEnabled = String(env.CASHFLOW_LEGACY_CHAT_FALLBACK || "").toLowerCase() === "true";
-  if (!fallbackEnabled) {
-    return { chatId: null, userId: String(userId) };
-  }
-
   const chatId = await resolveLinkedChatId({ bq, projectId, dataset, userId });
   if (!chatId) {
-    return { chatId: null, userId: String(userId) };
+    throw new Error("No Telegram chat linked to this user. Open /dashboard from the bot first.");
   }
 
-  return { chatId, userId: String(userId) };
-}
-
-function getRequestId(request) {
-  return (
-    request.headers.get("x-request-id") ||
-    request.headers.get("x-cloud-trace-context")?.split("/")[0] ||
-    ""
-  );
-}
-
-function logCashflowError(context, error) {
-  const payload = {
-    type: "cashflow_error",
-    request_id: context.requestId || "",
-    has_session: Boolean(context.email),
-    email: context.email || "",
-    user_id: context.userId || null,
-    chat_id: context.chatId || null,
-    from: context.from || "",
-    to: context.to || "",
-    error_name: error?.name || "Error",
-    error_message: String(error?.message || ""),
-    bq_errors: error?.errors || error?.response?.errors || null
-  };
-  console.error(JSON.stringify(payload));
+  return chatId;
 }
 
 export async function handleCashflowRequest({ request, bq, env }) {
-  const { searchParams } = new URL(request.url);
-  const from = searchParams.get("from");
-  const to = searchParams.get("to");
-  const email = normalizeEmail(getAuthenticatedEmail(request));
-  const requestId = getRequestId(request);
-  const context = { requestId, email, from, to, userId: null, chatId: null };
-
   try {
+    const { searchParams } = new URL(request.url);
+    const from = searchParams.get("from");
+    const to = searchParams.get("to");
+
     const fromISO = parseMonthParam(from);
     const toISO = parseMonthParam(to);
 
@@ -203,13 +168,7 @@ export async function handleCashflowRequest({ request, bq, env }) {
       return new Response("Invalid from/to", { status: 400 });
     }
 
-    const { chatId, userId } = await resolveAuthorizedChatId({ request, bq, env });
-    context.userId = userId;
-    context.chatId = chatId;
-
-    if (!chatId) {
-      return Response.json({ ok: true, rows: [], totals: {}, empty_reason: "no_linked_chat" });
-    }
+    const chatId = await resolveAuthorizedChatId({ request, bq, env });
 
     const months = buildMonths(fromISO, toISO);
     const [cardRules, noMsiRows, msiRows] = await Promise.all([
@@ -228,21 +187,16 @@ export async function handleCashflowRequest({ request, bq, env }) {
 
     noMsiRows.forEach((row) => {
       const rule = cardRuleMap.get(row.card_name);
-      const cashflowMonth = rule
-        ? getCashflowMonthForPurchase({
-            purchaseDateISO: row.purchase_date,
-            cutDay: rule.cut_day,
-            payOffsetDays: rule.pay_offset_days,
-            rollWeekendToMonday: rule.roll_weekend_to_monday
-          })
-        : `${String(row.purchase_date).slice(0, 7)}-01`;
+      if (!rule) return;
+      const cashflowMonth = getCashflowMonthForPurchase({
+        purchaseDateISO: row.purchase_date,
+        cutDay: rule.cut_day,
+        payOffsetDays: rule.pay_offset_days,
+        rollWeekendToMonday: rule.roll_weekend_to_monday
+      });
       const ym = cashflowMonth.slice(0, 7);
-      const entry = rowsByCard.get(row.card_name) ?? {
-        card_name: row.card_name,
-        totals: {}
-      };
+      const entry = rowsByCard.get(row.card_name);
       addToTotals(entry.totals, ym, row.total);
-      rowsByCard.set(row.card_name, entry);
     });
 
     msiRows.forEach((row) => {
@@ -268,7 +222,7 @@ export async function handleCashflowRequest({ request, bq, env }) {
       });
     });
 
-    return Response.json({ ok: true, months, rows, totals });
+    return Response.json({ months, rows, totals });
   } catch (error) {
     const status =
       error.message === "Unauthorized"
@@ -278,11 +232,6 @@ export async function handleCashflowRequest({ request, bq, env }) {
             error.message.startsWith("Invalid or expired link_token")
           ? 403
           : 500;
-
-    if (status === 500) {
-      logCashflowError(context, error);
-      return Response.json({ ok: false, error: "Internal" }, { status: 500 });
-    }
 
     return new Response(error.message ?? "Server error", { status });
   }
