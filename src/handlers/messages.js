@@ -8,18 +8,8 @@ import {
   escapeHtml,
   mainKeyboard
 } from "../telegram.js";
-import {
-  localParseExpense,
-  naiveParse,
-  validateDraft,
-  overrideRelativeDate,
-  preview,
-  guessCategory,
-  guessMerchant,
-  cleanTextForDescription,
-  paymentMethodPreview,
-  todayISOInTZ
-} from "../parsing.js";
+import { validateDraft, preview, paymentMethodPreview, todayISOInTZ } from "../parsing.js";
+import { buildDraftFromText, parseJustMonths, applyDraftAction } from "../../packages/finclaro-core/index.js";
 import {
   getDraft,
   setDraft,
@@ -65,29 +55,6 @@ import {
   parseMovementCommand
 } from "../ledger.js";
 
-function round2(n) {
-  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
-}
-
-function looksLikeMsiText(text) {
-  const t = String(text || "").toLowerCase();
-  // cubre: "msi", "a msi", "6msi", "6 msi", "meses sin intereses"
-  return (
-    /\bmsi\b/.test(t) ||
-    /\bmeses?\s+sin\s+intereses?\b/.test(t) ||
-    /\d+\s*msi\b/.test(t)
-  );
-}
-
-function parseJustMonths(text) {
-  // Acepta "6", "6 meses", "a 6", "6 msi"
-  const t = String(text || "").toLowerCase().trim();
-  const m = t.match(/(\d{1,2})/);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isFinite(n) || n <= 1 || n > 60) return null;
-  return n;
-}
 
 function isValidUuid(value) {
   const s = String(value || "").trim();
@@ -950,39 +917,31 @@ ID: <code>${escapeHtml(
           return;
         }
 
-        existing.is_msi = true;
-        existing.msi_months = n;
+        const nextResult = applyDraftAction(existing, { type: "setMsiMonths", months: n });
+        const nextDraft = nextResult.draft;
 
-        // total compra debe existir; si no, usa amount_mxn (por seguridad)
-        if (!existing.msi_total_amount || Number(existing.msi_total_amount) <= 0) {
-          existing.msi_total_amount = Number(existing.amount_mxn);
-        }
-
-        if (!existing.payment_method) {
+        if (!nextDraft.payment_method) {
           await sendMessage(chatId, "Elige un método con botones o escribe cancelar.");
           return;
         }
 
-        const cacheMeta = existing.__perf?.cache_hit || { card_rules: null, llm: null };
-        existing.__perf = { ...existing.__perf, cache_hit: cacheMeta };
+        const cacheMeta = nextDraft.__perf?.cache_hit || { card_rules: null, llm: null };
+        nextDraft.__perf = { ...nextDraft.__perf, cache_hit: cacheMeta };
         if (requestId) {
-          existing.__perf = { ...existing.__perf, request_id: requestId };
+          nextDraft.__perf = { ...nextDraft.__perf, request_id: requestId };
         }
 
-        existing.msi_start_month = await getBillingMonthForPurchaseFn({
+        nextDraft.msi_start_month = await getBillingMonthForPurchaseFn({
           chatId,
-          cardName: existing.payment_method,
-          purchaseDateISO: existing.purchase_date,
+          cardName: nextDraft.payment_method,
+          purchaseDateISO: nextDraft.purchase_date,
           cacheMeta
         });
 
         // amount_mxn = mensual (cashflow)
-        existing.amount_mxn = round2(Number(existing.msi_total_amount) / n);
-
-        existing.__state = "ready_to_confirm";
-        setDraft(chatId, existing);
-        await sendMessage(chatId, preview(existing), {
-          reply_markup: mainKeyboardFn(existing)
+        setDraft(chatId, nextDraft);
+        await sendMessage(chatId, preview(nextDraft), {
+          reply_markup: mainKeyboardFn(nextDraft)
         });
         return;
       }
@@ -993,14 +952,19 @@ ID: <code>${escapeHtml(
       const draftFlowStart = Date.now();
       let draftAnyBqMs = 0;
       const localParseStart = Date.now();
-      let draft = localParseExpense(text);
+      const cachedActiveTrip = getActiveTripCache(chatId);
+      const { draft, wantsMsi, error } = buildDraftFromText(text, {
+        text,
+        requestId,
+        parseMs: 0,
+        activeTrip: cachedActiveTrip
+      });
       const localParseMs = Date.now() - localParseStart;
+      draft.__perf.parse_ms = localParseMs;
 
       console.info(
         `⏱️ local-parse=${localParseMs}ms amounts=${draft.__meta?.amounts_found || 0} msi=${draft.is_msi}`
       );
-
-      const wantsMsi = draft.is_msi || looksLikeMsiText(text);
 
       if (!/\d/.test(text)) {
         option = "text:no_amount";
@@ -1008,134 +972,14 @@ ID: <code>${escapeHtml(
         return;
       }
 
-      draft.raw_text = text;
-      draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-      draft.__perf = {
-        parse_ms: localParseMs,
-        cache_hit: { card_rules: null, llm: null },
-        request_id: requestId
-      };
-
-      if (!isFinite(draft.amount_mxn) || draft.amount_mxn <= 0) {
-        draft = naiveParse(text);
-        draft.raw_text = text;
-        draft.purchase_date = overrideRelativeDate(text, draft.purchase_date);
-        draft.__perf = {
-          parse_ms: localParseMs,
-          cache_hit: { card_rules: null, llm: null },
-          request_id: requestId
-        };
-      }
-
-      if (wantsMsi) {
-        draft.is_msi = true;
-        draft.msi_total_amount = Number(draft.msi_total_amount || draft.amount_mxn);
-      }
-
-      draft.payment_method = null;
-      draft.amex_ambiguous = false;
-
-      const amountToken = draft.__meta?.amount_tokens?.[0] || "";
-      draft.description = cleanTextForDescription(text, amountToken, null) || "Gasto";
-      draft.merchant = guessMerchant(text) || "";
-      draft.category = guessCategory(`${draft.merchant} ${draft.description}`);
-
-      const cachedActiveTrip = getActiveTripCache(chatId);
-      const activeTripBaseCurrency = cachedActiveTrip?.baseCurrency || null;
-      draft.active_trip_id = cachedActiveTrip?.tripId || null;
-      draft.active_trip_name = cachedActiveTrip?.tripName || null;
-      draft.active_trip_base_currency = activeTripBaseCurrency;
-      draft.trip_id = cachedActiveTrip?.tripId || null;
-      draft.trip_name = cachedActiveTrip?.tripName || null;
-
-      if (draft.currency_explicit === false) {
-        if (draft.trip_id && activeTripBaseCurrency) {
-          draft.currency = activeTripBaseCurrency;
-        } else {
-          draft.currency = "MXN";
-        }
-      }
-
-      const err = validateDraft(draft, { skipPaymentMethod: true });
-      if (err) {
+      if (error) {
         option = "draft:invalid";
-        await sendMessage(chatId, err);
+        await sendMessage(chatId, error);
         return;
       }
 
-      // =========================
-      // FLUJO B: MSI (step 1)
-      // - parsea todo lo que se pueda del gasto,
-      // - guarda draft incompleto,
-      // - pregunta meses.
-      // =========================
-      if (wantsMsi) {
-        option = "draft:msi_step1";
-        // interpretamos el monto del texto como TOTAL de la compra
-        draft.is_msi = true;
-        draft.msi_total_amount = Number(draft.msi_total_amount || draft.amount_mxn);
+      option = wantsMsi ? "draft:msi_step1" : "draft:normal";
 
-        if (!Number.isFinite(draft.msi_months) || draft.msi_months <= 1) {
-          draft.msi_months = null;
-          draft.__state = "awaiting_payment_method";
-
-          setDraft(chatId, draft);
-          const cardLookupStart = Date.now();
-          const activeCards = await getActiveCardNamesFn(chatId);
-          draftAnyBqMs += Date.now() - cardLookupStart;
-          const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
-
-          const uiRenderStart = Date.now();
-          await sendMessage(chatId, paymentMethodPreview(draft), {
-            reply_markup: paymentMethodKeyboardFn(paymentMethods)
-          });
-          const uiRenderMs = Date.now() - uiRenderStart;
-          logExpenseDraftPerf({
-            requestId,
-            chatId,
-            msTotal: Date.now() - draftFlowStart,
-            msParse: localParseMs,
-            msUiRender: uiRenderMs,
-            msAnyBq: draftAnyBqMs
-          });
-          return;
-        }
-
-        draft.amount_mxn = round2(Number(draft.msi_total_amount) / draft.msi_months);
-        draft.__state = "awaiting_payment_method";
-
-        setDraft(chatId, draft);
-        const cardLookupStart = Date.now();
-        const activeCards = await getActiveCardNamesFn(chatId);
-        draftAnyBqMs += Date.now() - cardLookupStart;
-        const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
-
-        const uiRenderStart = Date.now();
-        await sendMessage(chatId, paymentMethodPreview(draft), {
-          reply_markup: paymentMethodKeyboardFn(paymentMethods)
-        });
-        const uiRenderMs = Date.now() - uiRenderStart;
-        logExpenseDraftPerf({
-          requestId,
-          chatId,
-          msTotal: Date.now() - draftFlowStart,
-          msParse: localParseMs,
-          msUiRender: uiRenderMs,
-          msAnyBq: draftAnyBqMs
-        });
-        return;
-      }
-
-      // =========================
-      // FLUJO C: normal (sin MSI)
-      // =========================
-      option = "draft:normal";
-      draft.is_msi = false;
-      draft.msi_months = null;
-      draft.msi_total_amount = null;
-      draft.msi_start_month = null;
-
-      draft.__state = "awaiting_payment_method";
       setDraft(chatId, draft);
       const cardLookupStart = Date.now();
       const activeCards = await getActiveCardNamesFn(chatId);

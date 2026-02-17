@@ -6,6 +6,7 @@ import {
   tgEditMessage
 } from "../telegram.js";
 import { preview, validateDraft } from "../parsing.js";
+import { applyDraftAction } from "../../packages/finclaro-core/index.js";
 import {
   getDraft,
   setDraft,
@@ -265,28 +266,19 @@ export function createCallbackHandler({
           return;
         }
 
-        if (data === "trip_exclude") {
-          draft.trip_id = null;
-          draft.trip_name = null;
-          if (draft.currency_explicit === false) {
-            draft.currency = "MXN";
-          }
-        } else {
-          draft.trip_id = draft.active_trip_id || null;
-          draft.trip_name = draft.active_trip_name || null;
-          if (draft.currency_explicit === false) {
-            draft.currency = draft.active_trip_base_currency || "MXN";
-          }
-        }
+        const toggled = applyDraftAction(draft, {
+          type: "toggleTripInclude",
+          include: data === "trip_include"
+        }).draft;
 
-        setDraft(chatId, draft);
+        setDraft(chatId, toggled);
         const messageId = cb.message?.message_id;
         if (messageId) {
-          await editMessage(chatId, messageId, preview(draft), {
-            reply_markup: mainKeyboardFn(draft)
+          await editMessage(chatId, messageId, preview(toggled), {
+            reply_markup: mainKeyboardFn(toggled)
           });
         } else {
-          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn(draft) });
+          await sendMessage(chatId, preview(toggled), { reply_markup: mainKeyboardFn(toggled) });
         }
 
         await answerCallback(cb.id);
@@ -376,16 +368,18 @@ export function createCallbackHandler({
           return;
         }
 
-        draft.payment_method = method;
-        draft.__state = "ready_to_confirm";
+        const selected = applyDraftAction(draft, {
+          type: "selectPaymentMethod",
+          method
+        }).draft;
         const messageId = cb.message?.message_id;
         if (requestId) {
-          draft.__perf = { ...draft.__perf, request_id: requestId };
+          selected.__perf = { ...selected.__perf, request_id: requestId };
         }
 
-        if (draft.is_msi && (!draft.msi_months || Number(draft.msi_months) <= 1)) {
-          draft.__state = "awaiting_msi_months";
-          setDraft(chatId, draft);
+        if (selected.is_msi && (!selected.msi_months || Number(selected.msi_months) <= 1)) {
+          selected.__state = "awaiting_msi_months";
+          setDraft(chatId, selected);
           const question =
             "🧾 Detecté <b>MSI</b>. ¿A cuántos meses? (responde solo el número, ej: <code>6</code>)";
           if (messageId) {
@@ -397,31 +391,32 @@ export function createCallbackHandler({
           return;
         }
 
-        if (draft.is_msi) {
-          const cacheMeta = draft.__perf?.cache_hit || { card_rules: null, llm: null };
-          draft.__perf = { ...draft.__perf, cache_hit: cacheMeta };
+        if (selected.is_msi) {
+          const cacheMeta = selected.__perf?.cache_hit || { card_rules: null, llm: null };
+          selected.__perf = { ...selected.__perf, cache_hit: cacheMeta };
 
-          draft.msi_start_month = await getBillingMonthForPurchaseFn({
+          selected.msi_start_month = await getBillingMonthForPurchaseFn({
             chatId,
-            cardName: draft.payment_method,
-            purchaseDateISO: draft.purchase_date,
+            cardName: selected.payment_method,
+            purchaseDateISO: selected.purchase_date,
             cacheMeta
           });
         }
 
-        const err = validateDraft(draft);
+        const err = validateDraft(selected);
         if (err) {
           await sendMessage(chatId, err);
           await answerCallback(cb.id);
           return;
         }
 
+        setDraft(chatId, selected);
         if (messageId) {
-          await editMessage(chatId, messageId, preview(draft), {
-            reply_markup: mainKeyboardFn(draft)
+          await editMessage(chatId, messageId, preview(selected), {
+            reply_markup: mainKeyboardFn(selected)
           });
         } else {
-          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn(draft) });
+          await sendMessage(chatId, preview(selected), { reply_markup: mainKeyboardFn(selected) });
         }
         await answerCallback(cb.id);
         return;
