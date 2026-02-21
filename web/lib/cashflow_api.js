@@ -3,9 +3,9 @@ import { getMonthRange, normalizeMonthStart } from "./months.js";
 import {
   consumeLinkToken,
   ensureUserExists,
-  getAuthenticatedEmail,
   resolveLinkedChatId
 } from "./dashboard_identity.js";
+import { getSessionUserFromRequest } from "./session.js";
 
 function requiredEnv(env, name) {
   const value = env[name];
@@ -125,7 +125,8 @@ async function resolveAuthorizedChatId({ request, bq, env }) {
     return String(legacyChatId);
   }
 
-  const email = getAuthenticatedEmail(request);
+  const sessionUser = getSessionUserFromRequest(request, env);
+  const email = sessionUser?.email || "";
   if (!email) {
     throw new Error("Missing authenticated user email");
   }
