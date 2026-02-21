@@ -125,8 +125,7 @@ test("saveExpense incluye trip_id del draft cuando aplica", async () => {
       description: baseDraft.description,
       cache_hit: false
     }),
-    llmProviderEnv: "local",
-    resolveUserIdByChatIdFn: async () => null
+    llmProviderEnv: "local"
   });
 
   assert.equal(calls.length, 1);
@@ -401,8 +400,7 @@ test("saveExpense no truena sin viaje activo y no inserta trip_id", async () => 
       description: baseDraft.description,
       cache_hit: false
     }),
-    llmProviderEnv: "local",
-    resolveUserIdByChatIdFn: async () => null
+    llmProviderEnv: "local"
   });
 
   assert.equal(result.ok, true);
