@@ -1127,6 +1127,13 @@ export function createEnrichmentRetryStore({ bigqueryClient } = {}) {
         merchant: merchant ? String(merchant) : null,
         description: description ? String(description) : null
       },
+      types: {
+        chat_id: "STRING",
+        expense_id: "STRING",
+        category: "STRING",
+        merchant: "STRING",
+        description: "STRING"
+      },
       parameterMode: "NAMED"
     };
 
