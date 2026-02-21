@@ -9,7 +9,7 @@ import {
   mainKeyboard
 } from "../telegram.js";
 import { validateDraft, preview, paymentMethodPreview, todayISOInTZ } from "../parsing.js";
-import { buildDraftFromText, parseJustMonths, applyDraftAction } from "../../packages/finclaro-core/index.js";
+import { buildDraftFromText, parseJustMonths, applyDraftAction } from "finclaro-core";
 import {
   getDraft,
   setDraft,

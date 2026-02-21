@@ -6,7 +6,7 @@ import {
   tgEditMessage
 } from "../telegram.js";
 import { preview, validateDraft } from "../parsing.js";
-import { applyDraftAction } from "../../packages/finclaro-core/index.js";
+import { applyDraftAction } from "finclaro-core";
 import {
   getDraft,
   setDraft,
