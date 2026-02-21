@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { LLM_PROVIDER } from "../config.js";
 import {
   insertExpenseAndMaybeInstallments,
+  resolveUserIdByChatId,
   updateExpenseEnrichment,
   enqueueEnrichmentRetry
 } from "../storage/bigquery.js";
@@ -75,6 +76,7 @@ export async function saveExpense({
   draft,
   insertExpense = insertExpenseAndMaybeInstallments,
   sendMessage = tgSend,
+  resolveUserIdByChatIdFn = resolveUserIdByChatId,
   updateExpenseEnrichmentFn = updateExpenseEnrichment,
   enqueueEnrichmentRetryFn = enqueueEnrichmentRetry,
   enrichExpenseLLMFn = enrichExpenseLLM,
@@ -114,8 +116,20 @@ export async function saveExpense({
 
     setIdempotencyPending(idempotencyKey);
 
+    const userId = await resolveUserIdByChatIdFn(chatId);
+    console.log(
+      JSON.stringify({
+        type: "expense_identity_resolution",
+        chat_id: String(chatId),
+        resolved_user_id: userId ?? null
+      })
+    );
+
     const tripId = draft?.trip_id || null;
-    const draftWithTrip = tripId ? { ...draft, trip_id: tripId } : { ...draft };
+    const draftWithIdentity = { ...draft, user_id: userId ?? null };
+    const draftWithTrip = tripId
+      ? { ...draftWithIdentity, trip_id: tripId }
+      : draftWithIdentity;
     const expenseId = await insertExpense(draftWithTrip, chatId);
     setIdempotencySaved(idempotencyKey, expenseId);
     console.log(

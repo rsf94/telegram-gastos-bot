@@ -120,6 +120,7 @@ export async function insertExpenseToBQ(draft, chatId) {
     raw_text: draft.raw_text || null,
     source: "telegram",
     chat_id: String(chatId),
+    user_id: draft.user_id ? String(draft.user_id) : null,
 
     is_msi: isMsi,
     msi_months: isMsi ? Number(draft.msi_months || null) : null,
@@ -131,6 +132,34 @@ export async function insertExpenseToBQ(draft, chatId) {
 
   await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
   return row.id;
+}
+
+export async function resolveUserIdByChatId(chatId, { bigqueryClient } = {}) {
+  const client = bigqueryClient || bq;
+  const query = `
+    SELECT user_id
+    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.chat_links\`
+    WHERE chat_id = @chat_id
+      AND status = 'LINKED'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+
+  const options = {
+    query,
+    location: "US",
+    params: {
+      chat_id: String(chatId)
+    }
+  };
+
+  const [rows] = await client.query(options);
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+
+  const userId = rows[0]?.user_id;
+  return userId ? String(userId) : null;
 }
 
 export async function insertPendingUserLink({
@@ -1318,6 +1347,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     raw_text: draft.raw_text || null,
     source: "telegram",
     chat_id: String(chatId),
+    user_id: draft.user_id ? String(draft.user_id) : null,
 
     is_msi: isMsi,
     msi_months: isMsi ? msiMonths : null,
