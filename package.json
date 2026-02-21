@@ -11,6 +11,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "@google-cloud/bigquery": "^7.9.0",
-    "finclaro-core": "https://codeload.github.com/rsf94/finclaro-core/tar.gz/b6d0d77650acec8eda9a207f07719a8f4c4d5c89"
+    "finclaro-core": "git+ssh://git@github.com/rsf94/finclaro-core.git#9ec963d8fd152f2f204fcec758b6ebfdc4e29fc2"
   }
 }
