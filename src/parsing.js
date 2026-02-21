@@ -11,7 +11,7 @@ import {
   localParseExpense as coreLocalParseExpense,
   naiveParse as coreNaiveParse,
   validateDraft as coreValidateDraft
-} from "../packages/finclaro-core/index.js";
+} from "finclaro-core";
 
 function formatAmountWithCurrency(amount, currency = "MXN") {
   return `${Number(amount || 0)} ${String(currency || "MXN").toUpperCase()}`;
