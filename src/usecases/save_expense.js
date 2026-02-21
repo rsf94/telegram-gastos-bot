@@ -157,24 +157,25 @@ export async function saveExpense({
       let usedFallback = false;
 
       try {
+        console.log(
+          JSON.stringify({
+            type: "llm_update",
+            stage: "start",
+            expense_id: expenseId,
+            provider: preferredProvider
+          })
+        );
         const ai = await enrichExpenseLLMFn({ text: draft.raw_text || "", baseDraft: draft });
         llmMs = Date.now() - llmStart;
         llmProvider = ai.llm_provider || llmProvider;
         usedFallback = llmProvider !== preferredProvider;
         const llmCacheHit = Boolean(ai.cache_hit);
 
-        const enrichment =
-          llmProvider === "local"
-            ? {
-                category: draft.category,
-                merchant: draft.merchant,
-                description: draft.description
-              }
-            : {
-                category: ai.category,
-                merchant: ai.merchant,
-                description: ai.description
-              };
+        const enrichment = {
+          category: ai.category,
+          merchant: ai.merchant,
+          description: ai.description
+        };
 
         const updateStart = Date.now();
         const updateResult = await runEnrichmentUpdateWithRetry({
@@ -187,6 +188,14 @@ export async function saveExpense({
           enqueueEnrichmentRetryFn
         });
         bqUpdateMs = Date.now() - updateStart;
+        console.log(
+          JSON.stringify({
+            type: "llm_update",
+            stage: "applied",
+            expense_id: expenseId,
+            provider: llmProvider
+          })
+        );
 
         const bqMs = bqInsertMs + bqUpdateMs;
         const totalMs = parseMs + llmMs + bqMs;
