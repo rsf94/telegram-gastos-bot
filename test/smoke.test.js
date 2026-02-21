@@ -585,6 +585,7 @@ test("normal flow choose payment and confirm", async () => {
         description: baseDraft.description
       }),
       llmProviderEnv: "local",
+      resolveUserIdByChatIdFn: async () => null,
       resolveActiveTripForChatFn: async () => null
     });
     saved = draft;
@@ -643,6 +644,7 @@ test("msi flow months payment confirm", async () => {
         description: baseDraft.description
       }),
       llmProviderEnv: "local",
+      resolveUserIdByChatIdFn: async () => null,
       resolveActiveTripForChatFn: async () => null
     });
     saved = draft;
@@ -774,6 +776,7 @@ test("confirm idempotency prevents duplicate inserts", async () => {
       cache_hit: false
     }),
     llmProviderEnv: "local",
+    resolveUserIdByChatIdFn: async () => null,
     resolveActiveTripForChatFn: async () => null
   });
 
@@ -787,6 +790,7 @@ test("confirm idempotency prevents duplicate inserts", async () => {
       throw new Error("LLM should not be called");
     },
     llmProviderEnv: "local",
+    resolveUserIdByChatIdFn: async () => null,
     resolveActiveTripForChatFn: async () => null
   });
 
