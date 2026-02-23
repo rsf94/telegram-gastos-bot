@@ -5,37 +5,49 @@ import { ensureDraftFx } from "../src/usecases/ensure_draft_fx.js";
 import { preview } from "../src/parsing.js";
 import { createCallbackHandler } from "../src/handlers/callbacks.js";
 import { __resetState, setDraft } from "../src/state.js";
-import { __resolveBaseAmountForExpense } from "../src/storage/bigquery.js";
+import {
+  __resolveAmountMxnForExpense,
+  __resolveBaseAmountForExpense
+} from "../src/storage/bigquery.js";
 
-test("Draft + preview: 100JPY sushi usa FX fijo y muestra bloque", async () => {
-  const draft = await ensureDraftFx({
-    amount: 100,
-    amount_mxn: 100,
-    currency: "JPY",
-    base_currency: "MXN",
-    purchase_date: "2026-01-15",
-    payment_method: "BBVA",
-    category: "Comida",
-    description: "sushi",
-    is_msi: false
-  });
+test("Draft/preview: 200 JPY con base MXN usa Frankfurter y muestra conversión", async () => {
+  const draft = await ensureDraftFx(
+    {
+      amount: 200,
+      amount_mxn: 200,
+      currency: "JPY",
+      base_currency: "MXN",
+      purchase_date: "2026-01-15",
+      payment_method: "BBVA",
+      category: "Comida",
+      description: "prueba",
+      is_msi: false
+    },
+    {
+      fxClient: {
+        getFxRate: async () => ({ rate: 8.9, provider: "frankfurter" })
+      }
+    }
+  );
 
-  assert.equal(draft.fx_required, true);
-  assert.equal(draft.amount_base_currency, 11.11);
-  assert.equal(draft.fx_rate, 9);
-  assert.equal(draft.fx_provider, "fixed_trip");
+  assert.equal(draft.fx_provider, "frankfurter");
+  assert.equal(draft.fx_rate, 8.9);
+  assert.equal(draft.fx_rate_direction, "quote_per_base");
+  assert.equal(draft.fx_base_currency, "MXN");
+  assert.equal(draft.fx_quote_currency, "JPY");
+  assert.equal(draft.amount_base_currency, 22.47);
 
   const text = preview(draft);
-  assert.match(text, /100 JPY ≈ MXN 11\.11/);
-  assert.match(text, /FX fijo: 1 MXN = 9 JPY/);
+  assert.match(text, /200 JPY ≈ MXN 22\.47/);
+  assert.match(text, /provider frankfurter/);
 });
 
-test("Confirm mapping: usa amount_base_currency para amount_mxn lógico y preserva FX metadata", async () => {
+test("Persistencia: confirmar guarda amount_mxn en MXN y no el monto JPY original", async () => {
   __resetState();
   const calls = [];
   setDraft("77", {
-    amount: 100,
-    amount_mxn: 100,
+    amount: 200,
+    amount_mxn: 200,
     currency: "JPY",
     base_currency: "MXN",
     purchase_date: "2026-01-15",
@@ -44,9 +56,12 @@ test("Confirm mapping: usa amount_base_currency para amount_mxn lógico y preser
     description: "sushi",
     is_msi: false,
     fx_required: true,
-    fx_rate: 9,
-    fx_provider: "fixed_trip",
-    amount_base_currency: 11.11
+    fx_rate: 8.9,
+    fx_provider: "frankfurter",
+    fx_rate_direction: "quote_per_base",
+    fx_base_currency: "MXN",
+    fx_quote_currency: "JPY",
+    amount_base_currency: 22.47
   });
 
   const handler = createCallbackHandler({
@@ -63,35 +78,62 @@ test("Confirm mapping: usa amount_base_currency para amount_mxn lógico y preser
   await handler({ id: "cb-1", data: "confirm", message: { chat: { id: 77 }, message_id: 1 } });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].currency, "JPY");
-  assert.equal(calls[0].base_currency, "MXN");
-  assert.equal(calls[0].fx_required, true);
-  assert.equal(calls[0].fx_rate, 9);
-  assert.equal(calls[0].fx_provider, "fixed_trip");
-  assert.equal(calls[0].amount_base_currency, 11.11);
-  assert.equal(__resolveBaseAmountForExpense(calls[0]), 11.11);
+  assert.equal(__resolveBaseAmountForExpense(calls[0]), 22.47);
+  assert.equal(__resolveAmountMxnForExpense(calls[0]), 22.47);
+  assert.notEqual(__resolveAmountMxnForExpense(calls[0]), 200);
 });
 
-test("Caso MXN: no muestra FX y amount_mxn lógico se mantiene igual", async () => {
-  const draft = await ensureDraftFx({
-    amount: 100,
-    amount_mxn: 100,
-    currency: "MXN",
-    base_currency: "MXN",
-    purchase_date: "2026-01-15",
-    payment_method: "BBVA",
-    category: "Comida",
-    description: "tacos",
-    is_msi: false,
-    fx_required: true,
-    fx_rate: 0.12,
-    fx_provider: "mock",
-    amount_base_currency: 12
-  });
+test("Fallback: si falla Frankfurter para JPY/MXN usa fixed_trip", async () => {
+  const draft = await ensureDraftFx(
+    {
+      amount: 200,
+      amount_mxn: 200,
+      currency: "JPY",
+      base_currency: "MXN",
+      purchase_date: "2026-01-15",
+      payment_method: "BBVA",
+      category: "Comida",
+      description: "prueba",
+      is_msi: false
+    },
+    {
+      fxClient: {
+        getFxRate: async () => {
+          throw new Error("network down");
+        }
+      }
+    }
+  );
 
-  assert.equal(draft.fx_required, false);
-  assert.equal(__resolveBaseAmountForExpense(draft), 100);
+  assert.equal(draft.fx_provider, "fixed_trip");
+  assert.equal(draft.fx_rate, 9);
+  assert.equal(draft.amount_base_currency, 22.22);
+});
+
+test("Dirección: 200 MXN con base JPY muestra MXN ≈ JPY consistente", async () => {
+  const draft = await ensureDraftFx(
+    {
+      amount: 200,
+      amount_mxn: 200,
+      currency: "MXN",
+      currency_explicit: true,
+      base_currency: "JPY",
+      trip_id: "trip-1",
+      purchase_date: "2026-01-15",
+      payment_method: "BBVA",
+      category: "Transporte",
+      description: "gas",
+      is_msi: false
+    },
+    {
+      fxClient: {
+        getFxRate: async () => ({ rate: 8.9, provider: "frankfurter" })
+      }
+    }
+  );
+
   const text = preview(draft);
-  assert.doesNotMatch(text, /≈/);
-  assert.doesNotMatch(text, /FX fijo:/);
+  assert.match(text, /200 MXN ≈ JPY 22\.47/);
+  assert.equal(draft.amount_base_currency, 22.47);
+  assert.match(text, /rate 8\.9 \(MXN\/JPY, quote_per_base\)/);
 });

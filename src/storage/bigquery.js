@@ -2,6 +2,7 @@
 import bigqueryPkg from "@google-cloud/bigquery";
 const { BigQuery } = bigqueryPkg;
 import crypto from "crypto";
+import { convertAmountToBaseCurrency, normalizeCurrency } from "../fx/contract.js";
 
 import {
   BQ_PROJECT_ID,
@@ -70,6 +71,37 @@ export function __resolveBaseAmountForExpense(draft) {
     return amountMxn;
   }
   throw new Error("Invalid amount for expense insert");
+}
+
+export function __resolveAmountMxnForExpense(draft) {
+  const amount = Number(draft.amount);
+  const amountBase = Number(draft.amount_base_currency);
+  const baseCurrency = normalizeCurrency(draft.base_currency || "MXN");
+  const currency = normalizeCurrency(draft.currency || baseCurrency);
+
+  if (baseCurrency === "MXN") {
+    if (Number.isFinite(amountBase) && amountBase > 0) return amountBase;
+    if (currency === "MXN" && Number.isFinite(amount) && amount > 0) return amount;
+  }
+
+  if (currency === "MXN" && Number.isFinite(amount) && amount > 0) {
+    return amount;
+  }
+
+  const converted = convertAmountToBaseCurrency({
+    amount,
+    amountCurrency: currency,
+    baseCurrency: "MXN",
+    quoteCurrency: draft.fx_quote_currency || baseCurrency,
+    fxRate: draft.fx_rate,
+    fxRateDirection: draft.fx_rate_direction || "quote_per_base"
+  });
+  if (Number.isFinite(converted) && converted > 0) return converted;
+
+  const legacyAmountMxn = Number(draft.amount_mxn);
+  if (Number.isFinite(legacyAmountMxn) && legacyAmountMxn > 0 && currency === "MXN") return legacyAmountMxn;
+
+  throw new Error("Invalid amount_mxn mapping for expense insert");
 }
 
 
@@ -163,11 +195,12 @@ export async function insertExpenseToBQ(draft, chatId) {
   const isMsi = draft.is_msi === true;
 
   const amountBase = __resolveBaseAmountForExpense(draft);
+  const amountMxnResolved = __resolveAmountMxnForExpense(draft);
   const rowBase = {
     id: crypto.randomUUID(),
     created_at: new Date().toISOString(),
     purchase_date: draft.purchase_date,
-    amount_mxn: money2(amountBase),
+    amount_mxn: money2(amountMxnResolved),
     payment_method: draft.payment_method,
     category: draft.category || "Other",
     merchant: draft.merchant || null,
@@ -188,6 +221,9 @@ export async function insertExpenseToBQ(draft, chatId) {
     fx_required: draft.fx_required === true,
     fx_rate: draft.fx_rate != null ? Number(draft.fx_rate) : null,
     fx_provider: draft.fx_provider || null,
+    fx_rate_direction: draft.fx_rate_direction || null,
+    fx_base_currency: draft.fx_base_currency || null,
+    fx_quote_currency: draft.fx_quote_currency || null,
     amount_base_currency: money2(amountBase)
   };
 
@@ -197,6 +233,9 @@ export async function insertExpenseToBQ(draft, chatId) {
     "fx_required",
     "fx_rate",
     "fx_provider",
+    "fx_rate_direction",
+    "fx_base_currency",
+    "fx_quote_currency",
     "amount_base_currency"
   ];
   const fieldSet = await getTableFieldNames(table);
@@ -1405,6 +1444,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
   }
 
   const amountBase = __resolveBaseAmountForExpense(draft);
+  const amountMxnResolved = __resolveAmountMxnForExpense(draft);
   const msiTotalBase = isMsi ? amountBase : null;
   const monthlyAmountBase = isMsi ? round2(msiTotalBase / msiMonths) : null;
 
@@ -1412,7 +1452,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     id: String(expenseId),
     created_at: new Date().toISOString(),
     purchase_date: normalizeDateISO(draft.purchase_date),
-    amount_mxn: isMsi ? money2(monthlyAmountBase) : money2(amountBase),
+    amount_mxn: isMsi ? money2(round2(amountMxnResolved / msiMonths)) : money2(amountMxnResolved),
     payment_method: draft.payment_method,
     category: draft.category || "Other",
     merchant: draft.merchant || null,
@@ -1434,6 +1474,9 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     fx_required: draft.fx_required === true,
     fx_rate: draft.fx_rate != null ? Number(draft.fx_rate) : null,
     fx_provider: draft.fx_provider || null,
+    fx_rate_direction: draft.fx_rate_direction || null,
+    fx_base_currency: draft.fx_base_currency || null,
+    fx_quote_currency: draft.fx_quote_currency || null,
     amount_base_currency: money2(amountBase)
   };
 
@@ -1447,6 +1490,9 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     "fx_required",
     "fx_rate",
     "fx_provider",
+    "fx_rate_direction",
+    "fx_base_currency",
+    "fx_quote_currency",
     "amount_base_currency",
     "trip_id"
   ];

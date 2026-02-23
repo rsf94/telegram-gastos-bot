@@ -37,6 +37,9 @@ export function renderFxBlock(draft) {
   const amountOriginal = Number(draft?.amount);
   const fxRate = Number(draft?.fx_rate);
   const fxProvider = String(draft?.fx_provider || "").trim();
+  const fxDirection = String(draft?.fx_rate_direction || "").trim();
+  const fxBaseCurrency = String(draft?.fx_base_currency || baseCurrency).toUpperCase();
+  const fxQuoteCurrency = String(draft?.fx_quote_currency || currency).toUpperCase();
 
   if (!currency || !baseCurrency || !Number.isFinite(amountBaseCurrency)) return [];
 
@@ -56,7 +59,8 @@ export function renderFxBlock(draft) {
     meta.push("FX fijo: 1 MXN = 9 JPY");
   }
   if (Number.isFinite(fxRate) && fxRate > 0) {
-    meta.push(`rate ${formatMoney(fxRate, { maximumFractionDigits: 6 })}`);
+    const direction = fxDirection || "quote_per_base";
+    meta.push(`rate ${formatMoney(fxRate, { maximumFractionDigits: 6 })} (${fxQuoteCurrency}/${fxBaseCurrency}, ${direction})`);
   }
   if (fxProvider) {
     meta.push(`provider ${fxProvider}`);
