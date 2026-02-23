@@ -21,6 +21,38 @@ function formatDraftAmount(draft) {
   return formatAmountWithCurrency(draft?.amount_mxn, draft?.currency || "MXN");
 }
 
+function formatMoney(value, { minimumFractionDigits = 0, maximumFractionDigits = 2 } = {}) {
+  return new Intl.NumberFormat("es-MX", {
+    minimumFractionDigits,
+    maximumFractionDigits
+  }).format(Number(value || 0));
+}
+
+export function renderFxBlock(draft) {
+  if (draft?.fx_required !== true) return [];
+
+  const currency = String(draft?.currency || "").toUpperCase();
+  const baseCurrency = String(draft?.base_currency || "").toUpperCase();
+  const amountBaseCurrency = Number(draft?.amount_base_currency);
+  const fxRate = Number(draft?.fx_rate);
+
+  if (!currency || !baseCurrency || !Number.isFinite(amountBaseCurrency)) return [];
+
+  const lines = [`≈ ${baseCurrency} ${formatMoney(amountBaseCurrency)}`];
+  const months = Number(draft?.msi_months);
+
+  if (Number.isFinite(months) && months > 1) {
+    lines.push(`(≈ ${baseCurrency} ${formatMoney(amountBaseCurrency / months)} / mes)`);
+    return lines;
+  }
+
+  if (Number.isFinite(fxRate) && fxRate > 0) {
+    lines.push(`(1 ${currency} = ${formatMoney(fxRate, { maximumFractionDigits: 6 })} ${baseCurrency})`);
+  }
+
+  return lines;
+}
+
 function tripShortId(tripId) {
   const value = String(tripId || "").trim();
   if (!value) return "";
@@ -86,6 +118,12 @@ export function paymentMethodPreview(d) {
     lines.push(`Monto: <b>${escapeHtml(formatDraftAmount(d))}</b>`);
   }
 
+  const fxLines = renderFxBlock(d);
+  if (fxLines.length > 0) {
+    lines.push("");
+    lines.push(...fxLines.map((line) => escapeHtml(line)));
+  }
+
   const paymentLabel = d.payment_method ? escapeHtml(d.payment_method) : "❓ (falta)";
   lines.push(`Método: <b>${paymentLabel}</b>`);
   lines.push(`Fecha: <b>${escapeHtml(d.purchase_date)}</b>`);
@@ -117,6 +155,12 @@ export function preview(d) {
     lines.push(d.msi_start_month ? `Mes de inicio: <b>${escapeHtml(d.msi_start_month)}</b>` : "Mes de inicio: <b>❓ (falta)</b>");
   } else {
     lines.push(`Monto: <b>${escapeHtml(formatDraftAmount(d))}</b>`);
+  }
+
+  const fxLines = renderFxBlock(d);
+  if (fxLines.length > 0) {
+    lines.push("");
+    lines.push(...fxLines.map((line) => escapeHtml(line)));
   }
 
   const paymentLabel = d.payment_method ? escapeHtml(d.payment_method) : "❓ (falta)";
