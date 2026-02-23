@@ -577,6 +577,7 @@ test("normal flow choose payment and confirm", async () => {
       draft,
       sendMessage,
       insertExpense: async () => "exp-1",
+      resolveUserIdByChatIdFn: async () => null,
       updateExpenseEnrichmentFn: async () => {},
       enrichExpenseLLMFn: async ({ baseDraft }) => ({
         llm_provider: "local",
@@ -635,6 +636,7 @@ test("msi flow months payment confirm", async () => {
       draft,
       sendMessage,
       insertExpense: async () => "exp-2",
+      resolveUserIdByChatIdFn: async () => null,
       updateExpenseEnrichmentFn: async () => {},
       enrichExpenseLLMFn: async ({ baseDraft }) => ({
         llm_provider: "local",
@@ -765,6 +767,7 @@ test("confirm idempotency prevents duplicate inserts", async () => {
     draft,
     sendMessage,
     insertExpense,
+    resolveUserIdByChatIdFn: async () => null,
     updateExpenseEnrichmentFn: async () => {},
     enrichExpenseLLMFn: async ({ baseDraft }) => ({
       llm_provider: "local",
@@ -782,6 +785,7 @@ test("confirm idempotency prevents duplicate inserts", async () => {
     draft,
     sendMessage,
     insertExpense,
+    resolveUserIdByChatIdFn: async () => null,
     updateExpenseEnrichmentFn: async () => {},
     enrichExpenseLLMFn: async () => {
       throw new Error("LLM should not be called");

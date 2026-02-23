@@ -33,13 +33,14 @@ import {
   insertPendingUserLink,
   createTrip,
   setActiveTrip,
-  getActiveTripId,
   listTrips
 } from "../storage/bigquery.js";
 import { createLinkToken } from "../linking.js";
 import { getActiveCardRules } from "../cache/card_rules_cache.js";
 import { saveExpense } from "../usecases/save_expense.js";
-import { getActiveTripCache, setActiveTripCache } from "../cache/active_trip_cache.js";
+import { setActiveTripCache } from "../cache/active_trip_cache.js";
+import { getActiveTripForChat } from "../usecases/resolve_active_trip.js";
+import { attachActiveTripToDraft } from "../usecases/attach_active_trip.js";
 import { helpText, welcomeText } from "../ui/copy.js";
 import { buildUpcomingPaymentsReport } from "../payments.js";
 import {
@@ -234,8 +235,8 @@ export function createMessageHandler({
   insertPendingUserLinkFn = insertPendingUserLink,
   createTripFn = createTrip,
   setActiveTripFn = setActiveTrip,
-  getActiveTripIdFn = getActiveTripId,
   listTripsFn = listTrips,
+  resolveActiveTripForChatFn = getActiveTripForChat,
   handleAnalysisCommand
 } = {}) {
   return async function handleMessage(msg, { requestId } = {}) {
@@ -755,18 +756,16 @@ Moneda base: <b>${escapeHtml(code)}</b>`
         }
 
         if (subcommand === "actual") {
-          const activeTripId = await getActiveTripIdFn(chatId);
-          if (!activeTripId) {
-            setActiveTripCache(chatId, { tripId: null, tripName: null, baseCurrency: null });
+          const activeTrip = await resolveActiveTripForChatFn(chatId);
+          if (!activeTrip?.tripId) {
             await sendMessage(chatId, "No hay viaje activo. Usa <code>/viaje nuevo</code> o <code>/viaje usar</code>.");
             return;
           }
 
           const trips = await listTripsFn(chatId, 100);
-          const trip = findTripByIdOrPrefix(trips, activeTripId);
+          const trip = findTripByIdOrPrefix(trips, activeTrip.tripId);
           if (!trip) {
-            setActiveTripCache(chatId, { tripId: activeTripId, tripName: null, baseCurrency: null });
-            await sendMessage(chatId, `Viaje activo: <code>${escapeHtml(activeTripId)}</code>`);
+            await sendMessage(chatId, `Viaje activo: <code>${escapeHtml(activeTrip.tripId)}</code>`);
             return;
           }
 
@@ -849,14 +848,19 @@ ID: <code>${escapeHtml(
           return;
         }
 
+        const activeTrip = await resolveActiveTripForChatFn(chatId);
+        const draftWithTrip = attachActiveTripToDraft(draft, activeTrip);
+
         if (requestId) {
-          draft.__perf = { ...draft.__perf, request_id: requestId };
+          draftWithTrip.__perf = { ...draftWithTrip.__perf, request_id: requestId };
         }
 
-        const result = await saveExpenseFn({ chatId, draft });
+        const result = await saveExpenseFn({ chatId, draft: draftWithTrip });
         if (result.ok) {
           setLastExpenseId(chatId, result.expenseId);
           clearDraft(chatId);
+        } else {
+          setDraft(chatId, draftWithTrip);
         }
         return;
       }
@@ -952,18 +956,19 @@ ID: <code>${escapeHtml(
       const draftFlowStart = Date.now();
       let draftAnyBqMs = 0;
       const localParseStart = Date.now();
-      const cachedActiveTrip = getActiveTripCache(chatId);
+      const activeTrip = await resolveActiveTripForChatFn(chatId);
       const { draft, wantsMsi, error } = buildDraftFromText(text, {
         text,
         requestId,
         parseMs: 0,
-        activeTrip: cachedActiveTrip
+        activeTrip
       });
+      const draftWithTrip = attachActiveTripToDraft(draft, activeTrip);
       const localParseMs = Date.now() - localParseStart;
-      draft.__perf.parse_ms = localParseMs;
+      draftWithTrip.__perf.parse_ms = localParseMs;
 
       console.info(
-        `⏱️ local-parse=${localParseMs}ms amounts=${draft.__meta?.amounts_found || 0} msi=${draft.is_msi}`
+        `⏱️ local-parse=${localParseMs}ms amounts=${draftWithTrip.__meta?.amounts_found || 0} msi=${draftWithTrip.is_msi}`
       );
 
       if (!/\d/.test(text)) {
@@ -980,13 +985,13 @@ ID: <code>${escapeHtml(
 
       option = wantsMsi ? "draft:msi_step1" : "draft:normal";
 
-      setDraft(chatId, draft);
+      setDraft(chatId, draftWithTrip);
       const cardLookupStart = Date.now();
       const activeCards = await getActiveCardNamesFn(chatId);
       draftAnyBqMs += Date.now() - cardLookupStart;
       const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
       const uiRenderStart = Date.now();
-      await sendMessage(chatId, paymentMethodPreview(draft), {
+      await sendMessage(chatId, paymentMethodPreview(draftWithTrip), {
         reply_markup: paymentMethodKeyboardFn(paymentMethods)
       });
       const uiRenderMs = Date.now() - uiRenderStart;

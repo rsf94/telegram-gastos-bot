@@ -12,6 +12,7 @@ import { createCallbackHandler } from "../src/handlers/callbacks.js";
 import { __resetConfirmIdempotency } from "../src/cache/confirm_idempotency.js";
 import { __resetState, getDraft } from "../src/state.js";
 import { __resetActiveTripCache, setActiveTripCache, getActiveTripCache } from "../src/cache/active_trip_cache.js";
+import { getActiveTripForChat } from "../src/usecases/resolve_active_trip.js";
 
 function createMessageSpy() {
   const messages = [];
@@ -113,6 +114,7 @@ test("saveExpense incluye trip_id del draft cuando aplica", async () => {
     chatId: "50",
     draft,
     sendMessage,
+    resolveUserIdByChatIdFn: async () => null,
     insertExpense: async (insertDraft) => {
       calls.push(insertDraft);
       return "exp-trip-1";
@@ -388,6 +390,7 @@ test("saveExpense no truena sin viaje activo y no inserta trip_id", async () => 
     chatId: "51",
     draft,
     sendMessage,
+    resolveUserIdByChatIdFn: async () => null,
     insertExpense: async (insertDraft) => {
       calls.push(insertDraft);
       return "exp-no-trip-1";
@@ -485,7 +488,7 @@ test("flujo de gasto usa cache de viaje y no consulta BigQuery en hot-path", asy
   assert.equal(activeTripLookups, 0);
 });
 
-test("sin cache de viaje el draft queda sin trip_id y no consulta BigQuery", async () => {
+test("sin cache de viaje el draft consulta BigQuery y rehidrata cache", async () => {
   __resetState();
   __resetActiveTripCache();
 
@@ -494,19 +497,120 @@ test("sin cache de viaje el draft queda sin trip_id y no consulta BigQuery", asy
   const handler = createMessageHandler({
     sendMessage,
     getActiveCardNamesFn: async () => ["BBVA Platino"],
-    getActiveTripIdFn: async () => {
+    resolveActiveTripForChatFn: async () => {
       activeTripLookups += 1;
-      return "should-not-be-used";
+      return {
+        tripId: "trip-from-bq-1",
+        tripName: "Kyoto",
+        baseCurrency: "JPY"
+      };
     }
   });
 
   await handler({ chat: { id: 902 }, text: "100 uber eats" });
 
   const draft = getDraft("902");
-  assert.equal(draft.trip_id, null);
-  assert.equal(draft.active_trip_id, null);
-  assert.equal(draft.currency, "MXN");
+  assert.equal(draft.trip_id, "trip-from-bq-1");
+  assert.equal(draft.active_trip_id, "trip-from-bq-1");
+  assert.equal(draft.trip_name, "Kyoto");
+  assert.equal(draft.currency, "JPY");
+  assert.equal(activeTripLookups, 1);
+});
+
+test("getActiveTripForChat: cache miss + BQ hit rehidrata cache", async () => {
+  __resetActiveTripCache();
+  let activeTripLookups = 0;
+  const result = await getActiveTripForChat("1001", {
+    getActiveTripIdFn: async () => {
+      activeTripLookups += 1;
+      return "trip-a";
+    },
+    getTripByIdFn: async () => ({ name: "Roma", base_currency: "eur" })
+  });
+
+  assert.equal(result.tripId, "trip-a");
+  assert.equal(result.tripName, "Roma");
+  assert.equal(result.baseCurrency, "EUR");
+  assert.equal(activeTripLookups, 1);
+  assert.equal(getActiveTripCache("1001")?.tripId, "trip-a");
+});
+
+test("getActiveTripForChat: cache hit evita query a BigQuery", async () => {
+  __resetActiveTripCache();
+  setActiveTripCache("1002", { tripId: "trip-cache", tripName: "Madrid", baseCurrency: "EUR" });
+  let activeTripLookups = 0;
+  const result = await getActiveTripForChat("1002", {
+    getActiveTripIdFn: async () => {
+      activeTripLookups += 1;
+      return "trip-should-not-run";
+    }
+  });
+
+  assert.equal(result.tripId, "trip-cache");
   assert.equal(activeTripLookups, 0);
+});
+
+test("getActiveTripForChat: cache miss + BQ sin activo limpia cache", async () => {
+  __resetActiveTripCache();
+  setActiveTripCache("1003", { tripId: "trip-stale", tripName: "Stale", baseCurrency: "USD" });
+  const result = await getActiveTripForChat("1003", {
+    getActiveTripCacheFn: () => null,
+    getActiveTripIdFn: async () => null
+  });
+
+  assert.equal(result, null);
+  assert.equal(getActiveTripCache("1003")?.tripId ?? null, null);
+});
+
+test("confirmación usa getActiveTrip y guarda trip_id tras vaciar cache", async () => {
+  __resetState();
+  __resetActiveTripCache();
+  const { sendMessage } = createMessageSpy();
+  let savedDraft = null;
+
+  const handler = createMessageHandler({
+    sendMessage,
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    resolveActiveTripForChatFn: async () => ({
+      tripId: "trip-confirm-1",
+      tripName: "Tokyo",
+      baseCurrency: "JPY"
+    })
+  });
+
+  await handler({ chat: { id: 1200 }, text: "100 uber" });
+  __resetActiveTripCache();
+
+  const callbackHandler = createCallbackHandler({
+    sendMessage,
+    editMessage: async () => {},
+    answerCallback: async () => {},
+    getActiveCardNamesFn: async () => ["BBVA Platino"],
+    resolveActiveTripForChatFn: async () => ({
+      tripId: "trip-confirm-1",
+      tripName: "Tokyo",
+      baseCurrency: "JPY"
+    }),
+    saveExpenseFn: async ({ draft }) => {
+      savedDraft = draft;
+      return { ok: true, expenseId: "exp-confirm-1" };
+    }
+  });
+
+  await callbackHandler({
+    id: "cb-payment-trip",
+    data: "payment_method|BBVA Platino",
+    message: { chat: { id: 1200 }, message_id: 1 }
+  });
+
+  await callbackHandler({
+    id: "cb-confirm-trip",
+    data: "confirm",
+    message: { chat: { id: 1200 }, message_id: 1 }
+  });
+
+  assert.equal(savedDraft.trip_id, "trip-confirm-1");
+  assert.equal(savedDraft.active_trip_id, "trip-confirm-1");
 });
 
 test("/viaje apagar persiste sentinel append-only y limpia cache", async () => {
