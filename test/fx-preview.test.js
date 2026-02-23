@@ -30,15 +30,16 @@ test("JPY → MXN muestra conversión", () => {
       amount_mxn: 100,
       currency: "JPY",
       base_currency: "MXN",
-      amount_base_currency: 12.5,
-      fx_rate: 0.125,
-      fx_provider: "mock",
+      amount_base_currency: 11.11,
+      fx_rate: 9,
+      fx_provider: "fixed_trip",
       fx_required: true
     })
   );
 
-  assert.match(text, /100 JPY ≈ MXN 12\.5/);
-  assert.match(text, /rate 0\.125/);
+  assert.match(text, /100 JPY ≈ MXN 11\.11/);
+  assert.match(text, /FX fijo: 1 MXN = 9 JPY/);
+  assert.match(text, /provider fixed_trip/);
 });
 
 test("USD → MXN muestra conversión", () => {

@@ -1,4 +1,5 @@
 import { getFxRate } from "../fx/index.js";
+import { hydrateFixedFxForDraft } from "./fx_fixed_jpy_mxn.js";
 
 function normalizeCurrency(code, fallback = "MXN") {
   const value = String(code || fallback).trim().toUpperCase();
@@ -22,6 +23,11 @@ function resolveOriginalAmount(draft) {
 
 export async function ensureDraftFx(draft, { fxClient = { getFxRate } } = {}) {
   if (!draft || typeof draft !== "object") return draft;
+
+  const hydratedFixed = hydrateFixedFxForDraft(draft);
+  if (hydratedFixed?.currency === "JPY" && hydratedFixed?.fx_provider === "fixed_trip") {
+    return hydratedFixed;
+  }
 
   const currency = normalizeCurrency(draft.currency || "MXN");
   const baseCurrency = normalizeCurrency(draft.base_currency || "MXN");
