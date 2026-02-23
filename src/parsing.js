@@ -52,6 +52,9 @@ export function renderFxBlock(draft) {
   }
 
   const meta = [];
+  if (currency === "JPY" && baseCurrency === "MXN" && fxProvider === "fixed_trip") {
+    meta.push("FX fijo: 1 MXN = 9 JPY");
+  }
   if (Number.isFinite(fxRate) && fxRate > 0) {
     meta.push(`rate ${formatMoney(fxRate, { maximumFractionDigits: 6 })}`);
   }
