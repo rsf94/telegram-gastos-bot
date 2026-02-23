@@ -26,6 +26,8 @@ import {
   insertLedgerMovement
 } from "../storage/bigquery.js";
 import { ALLOWED_PAYMENT_METHODS } from "../config.js";
+import { getActiveTripForChat } from "../usecases/resolve_active_trip.js";
+import { attachActiveTripToDraft } from "../usecases/attach_active_trip.js";
 import {
   buildAccountSelectKeyboard,
   buildConfirmKeyboard,
@@ -58,6 +60,7 @@ export function createCallbackHandler({
   getActiveCardNamesFn = getActiveCardNames,
   getBillingMonthForPurchaseFn = getBillingMonthForPurchase,
   insertLedgerMovementFn = insertLedgerMovement,
+  resolveActiveTripForChatFn = getActiveTripForChat,
   handleAnalysisCallback
 } = {}) {
   return async function handleCallback(cb, { requestId } = {}) {
@@ -309,14 +312,19 @@ export function createCallbackHandler({
           return;
         }
 
+        const activeTrip = await resolveActiveTripForChatFn(chatId);
+        const draftWithTrip = attachActiveTripToDraft(draft, activeTrip);
+
         if (requestId) {
-          draft.__perf = { ...draft.__perf, request_id: requestId };
+          draftWithTrip.__perf = { ...draftWithTrip.__perf, request_id: requestId };
         }
 
-        const result = await saveExpenseFn({ chatId, draft });
+        const result = await saveExpenseFn({ chatId, draft: draftWithTrip });
         if (result.ok) {
           setLastExpenseId(chatId, result.expenseId);
           clearDraft(chatId);
+        } else {
+          setDraft(chatId, draftWithTrip);
         }
 
         await answerCallback(cb.id);
@@ -356,6 +364,8 @@ export function createCallbackHandler({
         }
 
         const method = data.split("|").slice(1).join("|").trim();
+        const activeTrip = await resolveActiveTripForChatFn(chatId);
+        const hydratedDraft = attachActiveTripToDraft(draft, activeTrip);
         const activeCards = await getActiveCardNamesFn(chatId);
         const allowed = new Set([
           ...ALLOWED_PAYMENT_METHODS,
@@ -368,7 +378,7 @@ export function createCallbackHandler({
           return;
         }
 
-        const selected = applyDraftAction(draft, {
+        const selected = applyDraftAction(hydratedDraft, {
           type: "selectPaymentMethod",
           method
         }).draft;
