@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "smoke": "node --test",
+    "test": "node --test",
+    "smoke": "node --test test/smoke.test.js",
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build"
   },
