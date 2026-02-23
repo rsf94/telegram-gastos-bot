@@ -11,6 +11,7 @@ function baseDraft(overrides = {}) {
     base_currency: "MXN",
     amount_base_currency: 100,
     fx_rate: 1,
+    fx_provider: null,
     fx_required: false,
     is_msi: false,
     msi_months: null,
@@ -31,12 +32,13 @@ test("JPY → MXN muestra conversión", () => {
       base_currency: "MXN",
       amount_base_currency: 12.5,
       fx_rate: 0.125,
+      fx_provider: "mock",
       fx_required: true
     })
   );
 
-  assert.match(text, /≈ MXN 12\.5/);
-  assert.match(text, /1 JPY = 0\.125 MXN/);
+  assert.match(text, /100 JPY ≈ MXN 12\.5/);
+  assert.match(text, /rate 0\.125/);
 });
 
 test("USD → MXN muestra conversión", () => {
@@ -48,12 +50,13 @@ test("USD → MXN muestra conversión", () => {
       base_currency: "MXN",
       amount_base_currency: 8500,
       fx_rate: 17,
+      fx_provider: "mock",
       fx_required: true
     })
   );
 
-  assert.match(text, /≈ MXN 8,500/);
-  assert.match(text, /1 USD = 17 MXN/);
+  assert.match(text, /500 USD ≈ MXN 8,500/);
+  assert.match(text, /rate 17/);
 });
 
 test("MXN → MXN no muestra conversión", () => {
@@ -80,6 +83,7 @@ test("MSI + FX muestra total convertido", () => {
       base_currency: "MXN",
       amount_base_currency: 15300,
       fx_rate: 17,
+      fx_provider: "mock",
       fx_required: true,
       is_msi: true,
       msi_months: 3,
@@ -98,6 +102,7 @@ test("Confirm preview no altera valores FX", () => {
     base_currency: "MXN",
     amount_base_currency: 8500,
     fx_rate: 17,
+    fx_provider: "mock",
     fx_required: true
   });
   const snapshot = structuredClone(draft);

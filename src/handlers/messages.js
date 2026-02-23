@@ -41,6 +41,7 @@ import { saveExpense } from "../usecases/save_expense.js";
 import { setActiveTripCache } from "../cache/active_trip_cache.js";
 import { getActiveTripForChat } from "../usecases/resolve_active_trip.js";
 import { attachActiveTripToDraft } from "../usecases/attach_active_trip.js";
+import { ensureDraftFx } from "../usecases/ensure_draft_fx.js";
 import { helpText, welcomeText } from "../ui/copy.js";
 import { buildUpcomingPaymentsReport } from "../payments.js";
 import {
@@ -860,17 +861,18 @@ ID: <code>${escapeHtml(
 
         const activeTrip = await resolveActiveTripForChatFn(chatId);
         const draftWithTrip = attachActiveTripToDraft(draft, activeTrip);
+        const draftWithFx = await ensureDraftFx(draftWithTrip);
 
         if (requestId) {
-          draftWithTrip.__perf = { ...draftWithTrip.__perf, request_id: requestId };
+          draftWithFx.__perf = { ...draftWithFx.__perf, request_id: requestId };
         }
 
-        const result = await saveExpenseFn({ chatId, draft: draftWithTrip });
+        const result = await saveExpenseFn({ chatId, draft: draftWithFx });
         if (result.ok) {
           setLastExpenseId(chatId, result.expenseId);
           clearDraft(chatId);
         } else {
-          setDraft(chatId, draftWithTrip);
+          setDraft(chatId, draftWithFx);
         }
         return;
       }
@@ -952,10 +954,12 @@ ID: <code>${escapeHtml(
           cacheMeta
         });
 
+        const nextDraftWithFx = await ensureDraftFx(nextDraft);
+
         // amount_mxn = mensual (cashflow)
-        setDraft(chatId, nextDraft);
-        await sendMessage(chatId, preview(nextDraft), {
-          reply_markup: mainKeyboardFn(nextDraft)
+        setDraft(chatId, nextDraftWithFx);
+        await sendMessage(chatId, preview(nextDraftWithFx), {
+          reply_markup: mainKeyboardFn(nextDraftWithFx)
         });
         return;
       }
@@ -989,9 +993,10 @@ ID: <code>${escapeHtml(
         activeTrip
       });
       const draftWithTrip = attachActiveTripToDraft(draft, activeTrip);
+      const draftWithFx = await ensureDraftFx(draftWithTrip);
       const draftBuildMs = Date.now() - draftBuildStart;
       const localParseMs = draftBuildMs;
-      draftWithTrip.__perf.parse_ms = localParseMs;
+      draftWithFx.__perf.parse_ms = localParseMs;
 
       if (error) {
         option = "draft:invalid";
@@ -1001,7 +1006,7 @@ ID: <code>${escapeHtml(
 
       option = wantsMsi ? "draft:msi_step1" : "draft:normal";
 
-      setDraft(chatId, draftWithTrip);
+      setDraft(chatId, draftWithFx);
       const activeCardsResult = await activeCardsPromise;
       if (!activeCardsResult.ok) {
         throw activeCardsResult.error;
@@ -1010,11 +1015,11 @@ ID: <code>${escapeHtml(
       draftAnyBqMs += Date.now() - cardLookupStart;
       const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
       const uiRenderStart = Date.now();
-      await sendMessage(chatId, paymentMethodPreview(draftWithTrip), {
+      await sendMessage(chatId, paymentMethodPreview(draftWithFx), {
         reply_markup: paymentMethodKeyboardFn(paymentMethods)
       });
       const uiRenderMs = Date.now() - uiRenderStart;
-      const fxMs = Number(draftWithTrip?.__perf?.fx_ms || 0);
+      const fxMs = Number(draftWithFx?.__perf?.fx_ms || 0);
       const totalMessageMs = Date.now() - draftFlowStart;
 
       logDraftTiming({

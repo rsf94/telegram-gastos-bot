@@ -19,6 +19,60 @@ import {
 const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
 let userLinksTableOverride = null;
 
+const tableSchemaCache = new Map();
+
+function shouldWarnMissingColumns() {
+  const env = String(process.env.NODE_ENV || "").toLowerCase();
+  return env === "development" || env === "dev" || env === "test";
+}
+
+async function getTableFieldNames(table) {
+  const key = table?.id || "";
+  if (tableSchemaCache.has(key)) return tableSchemaCache.get(key);
+
+  const [metadata] = await table.getMetadata();
+  const fields = metadata?.schema?.fields || [];
+  const fieldSet = new Set(fields.map((field) => String(field.name || "")));
+  tableSchemaCache.set(key, fieldSet);
+  return fieldSet;
+}
+
+function pickOptionalColumns(row, fieldSet, optionalColumns) {
+  const out = { ...row };
+  const missing = [];
+  for (const col of optionalColumns) {
+    if (fieldSet.has(col)) {
+      out[col] = row[col];
+    } else {
+      missing.push(col);
+      delete out[col];
+    }
+  }
+  if (missing.length && shouldWarnMissingColumns()) {
+    console.warn(JSON.stringify({ type: "bq_missing_columns", table: BQ_TABLE, missing }));
+  }
+  return out;
+}
+
+export function __resolveBaseAmountForExpense(draft) {
+  const fxRequired = draft.fx_required === true;
+  const amountBase = Number(draft.amount_base_currency);
+  const amount = Number(draft.amount);
+  const amountMxn = Number(draft.amount_mxn);
+
+  if (fxRequired && Number.isFinite(amountBase) && amountBase > 0) {
+    return amountBase;
+  }
+  if (Number.isFinite(amount) && amount > 0) {
+    return amount;
+  }
+  if (Number.isFinite(amountMxn) && amountMxn > 0) {
+    return amountMxn;
+  }
+  throw new Error("Invalid amount for expense insert");
+}
+
+
 function getUserLinksTable() {
   if (userLinksTableOverride) return userLinksTableOverride;
   return bq.dataset(BQ_DATASET).table("user_links");
@@ -108,11 +162,12 @@ export async function insertExpenseToBQ(draft, chatId) {
 
   const isMsi = draft.is_msi === true;
 
-  const row = {
+  const amountBase = __resolveBaseAmountForExpense(draft);
+  const rowBase = {
     id: crypto.randomUUID(),
     created_at: new Date().toISOString(),
     purchase_date: draft.purchase_date,
-    amount_mxn: money2(draft.amount_mxn),
+    amount_mxn: money2(amountBase),
     payment_method: draft.payment_method,
     category: draft.category || "Other",
     merchant: draft.merchant || null,
@@ -126,9 +181,26 @@ export async function insertExpenseToBQ(draft, chatId) {
     msi_months: isMsi ? Number(draft.msi_months || null) : null,
     msi_start_month: isMsi ? (draft.msi_start_month || null) : null,
     msi_total_amount: isMsi
-      ? money2(draft.msi_total_amount ?? draft.amount_mxn)
-      : null
+      ? money2(draft.msi_total_amount ?? amountBase)
+      : null,
+    currency: String(draft.currency || "MXN").toUpperCase(),
+    base_currency: String(draft.base_currency || "MXN").toUpperCase(),
+    fx_required: draft.fx_required === true,
+    fx_rate: draft.fx_rate != null ? Number(draft.fx_rate) : null,
+    fx_provider: draft.fx_provider || null,
+    amount_base_currency: money2(amountBase)
   };
+
+  const optionalColumns = [
+    "currency",
+    "base_currency",
+    "fx_required",
+    "fx_rate",
+    "fx_provider",
+    "amount_base_currency"
+  ];
+  const fieldSet = await getTableFieldNames(table);
+  const row = pickOptionalColumns(rowBase, fieldSet, optionalColumns);
 
   await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
   return row.id;
@@ -1310,7 +1382,6 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
   let billingMonthISO = null;
   let msiMonths = null;
   let msiTotal = null;
-  let monthlyAmount = null;
 
   if (isMsi) {
     msiMonths = Number(draft.msi_months);
@@ -1324,8 +1395,6 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
       throw new Error("MSI inválido: msi_total_amount debe ser > 0");
     }
 
-    // ✅ cashflow mensual (aunque deepseek se equivoque)
-    monthlyAmount = round2(msiTotal / msiMonths);
 
     // ✅ mes B según card_rules
     billingMonthISO = await getBillingMonthForPurchase({
@@ -1335,11 +1404,15 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     });
   }
 
-  const row = {
+  const amountBase = __resolveBaseAmountForExpense(draft);
+  const msiTotalBase = isMsi ? amountBase : null;
+  const monthlyAmountBase = isMsi ? round2(msiTotalBase / msiMonths) : null;
+
+  const rowBase = {
     id: String(expenseId),
     created_at: new Date().toISOString(),
     purchase_date: normalizeDateISO(draft.purchase_date),
-    amount_mxn: isMsi ? money2(monthlyAmount) : money2(draft.amount_mxn),
+    amount_mxn: isMsi ? money2(monthlyAmountBase) : money2(amountBase),
     payment_method: draft.payment_method,
     category: draft.category || "Other",
     merchant: draft.merchant || null,
@@ -1352,15 +1425,33 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
     is_msi: isMsi,
     msi_months: isMsi ? msiMonths : null,
     msi_start_month: isMsi ? normalizeDateISO(billingMonthISO) : null, // primer billing month (mes B)
-    msi_total_amount: isMsi ? money2(msiTotal) : null,
-    original_amount: isMsi ? money2(msiTotal) : money2(draft.amount_mxn),
+    msi_total_amount: isMsi ? money2(msiTotalBase) : null,
+    original_amount: isMsi ? money2(msiTotal) : money2(draft.amount ?? draft.amount_mxn),
     original_currency: String(draft.currency || "MXN").toUpperCase(),
-    amount_mxn_source: "manual"
+    amount_mxn_source: "manual",
+    currency: String(draft.currency || "MXN").toUpperCase(),
+    base_currency: String(draft.base_currency || "MXN").toUpperCase(),
+    fx_required: draft.fx_required === true,
+    fx_rate: draft.fx_rate != null ? Number(draft.fx_rate) : null,
+    fx_provider: draft.fx_provider || null,
+    amount_base_currency: money2(amountBase)
   };
 
   if (draft.trip_id) {
-    row.trip_id = String(draft.trip_id);
+    rowBase.trip_id = String(draft.trip_id);
   }
+
+  const optionalColumns = [
+    "currency",
+    "base_currency",
+    "fx_required",
+    "fx_rate",
+    "fx_provider",
+    "amount_base_currency",
+    "trip_id"
+  ];
+  const fieldSet = await getTableFieldNames(table);
+  const row = pickOptionalColumns(rowBase, fieldSet, optionalColumns);
 
   await table.insert([row], { skipInvalidRows: false, ignoreUnknownValues: false });
 
@@ -1371,7 +1462,7 @@ export async function insertExpenseAndMaybeInstallments(draft, chatId) {
       cardName: draft.payment_method,
       billingMonthISO,
       monthsTotal: msiMonths,
-      totalAmount: msiTotal
+      totalAmount: msiTotalBase
     });
   }
 
