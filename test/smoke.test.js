@@ -109,6 +109,31 @@ test("hola returns welcome copy", async () => {
   assert.ok(messages.at(-1).text.includes("Mándame un gasto"));
 });
 
+
+
+test("text without amount skips trip and card lookups", async () => {
+  __resetState();
+  const { sendMessage, messages } = createMessageSpy();
+  let tripLookups = 0;
+  let cardLookups = 0;
+  const handler = createMessageHandler({
+    sendMessage,
+    resolveActiveTripForChatFn: async () => {
+      tripLookups += 1;
+      return null;
+    },
+    getActiveCardNamesFn: async () => {
+      cardLookups += 1;
+      return [];
+    }
+  });
+
+  await handler({ chat: { id: 12 }, text: "hola sushi" });
+
+  assert.equal(messages.at(-1).text, welcomeText());
+  assert.equal(tripLookups, 0);
+  assert.equal(cardLookups, 0);
+});
 test("ayuda returns help copy", async () => {
   __resetState();
   const { sendMessage, messages } = createMessageSpy();

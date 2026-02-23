@@ -364,9 +364,11 @@ export function createCallbackHandler({
         }
 
         const method = data.split("|").slice(1).join("|").trim();
-        const activeTrip = await resolveActiveTripForChatFn(chatId);
+        const [activeTrip, activeCards] = await Promise.all([
+          resolveActiveTripForChatFn(chatId),
+          getActiveCardNamesFn(chatId)
+        ]);
         const hydratedDraft = attachActiveTripToDraft(draft, activeTrip);
-        const activeCards = await getActiveCardNamesFn(chatId);
         const allowed = new Set([
           ...ALLOWED_PAYMENT_METHODS,
           ...(activeCards?.length ? activeCards : [])
