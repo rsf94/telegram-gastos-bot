@@ -149,6 +149,16 @@ function logExpenseDraftPerf({ requestId, chatId, msTotal, msParse, msUiRender, 
   }
 }
 
+function shouldLogDraftTiming() {
+  const env = String(process.env.NODE_ENV || "").toLowerCase();
+  return env === "development" || env === "dev" || env === "test";
+}
+
+function logDraftTiming(payload) {
+  if (!shouldLogDraftTiming()) return;
+  console.log(JSON.stringify({ type: "draft_timing", ...payload }));
+}
+
 function base64UrlEncode(value) {
   return Buffer.from(value)
     .toString("base64")
@@ -953,10 +963,25 @@ ID: <code>${escapeHtml(
       // =========================
       // Detecta si es MSI (FLUJO B) o normal (FLUJO C)
       // =========================
+      if (!/\d/.test(text)) {
+        option = "text:no_amount";
+        await sendMessage(chatId, welcomeText());
+        return;
+      }
+
       const draftFlowStart = Date.now();
       let draftAnyBqMs = 0;
-      const localParseStart = Date.now();
-      const activeTrip = await resolveActiveTripForChatFn(chatId);
+      const tripResolutionStart = Date.now();
+      const activeTripPromise = resolveActiveTripForChatFn(chatId);
+      const cardLookupStart = Date.now();
+      const activeCardsPromise = getActiveCardNamesFn(chatId).then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error })
+      );
+      const activeTrip = await activeTripPromise;
+      const tripResolutionMs = Date.now() - tripResolutionStart;
+
+      const draftBuildStart = Date.now();
       const { draft, wantsMsi, error } = buildDraftFromText(text, {
         text,
         requestId,
@@ -964,18 +989,9 @@ ID: <code>${escapeHtml(
         activeTrip
       });
       const draftWithTrip = attachActiveTripToDraft(draft, activeTrip);
-      const localParseMs = Date.now() - localParseStart;
+      const draftBuildMs = Date.now() - draftBuildStart;
+      const localParseMs = draftBuildMs;
       draftWithTrip.__perf.parse_ms = localParseMs;
-
-      console.info(
-        `⏱️ local-parse=${localParseMs}ms amounts=${draftWithTrip.__meta?.amounts_found || 0} msi=${draftWithTrip.is_msi}`
-      );
-
-      if (!/\d/.test(text)) {
-        option = "text:no_amount";
-        await sendMessage(chatId, welcomeText());
-        return;
-      }
 
       if (error) {
         option = "draft:invalid";
@@ -986,8 +1002,11 @@ ID: <code>${escapeHtml(
       option = wantsMsi ? "draft:msi_step1" : "draft:normal";
 
       setDraft(chatId, draftWithTrip);
-      const cardLookupStart = Date.now();
-      const activeCards = await getActiveCardNamesFn(chatId);
+      const activeCardsResult = await activeCardsPromise;
+      if (!activeCardsResult.ok) {
+        throw activeCardsResult.error;
+      }
+      const activeCards = activeCardsResult.value;
       draftAnyBqMs += Date.now() - cardLookupStart;
       const paymentMethods = activeCards?.length ? activeCards : ALLOWED_PAYMENT_METHODS;
       const uiRenderStart = Date.now();
@@ -995,13 +1014,26 @@ ID: <code>${escapeHtml(
         reply_markup: paymentMethodKeyboardFn(paymentMethods)
       });
       const uiRenderMs = Date.now() - uiRenderStart;
+      const fxMs = Number(draftWithTrip?.__perf?.fx_ms || 0);
+      const totalMessageMs = Date.now() - draftFlowStart;
+
+      logDraftTiming({
+        request_id: requestId || null,
+        chat_id: chatId,
+        draft_build_ms: draftBuildMs,
+        trip_resolution_ms: tripResolutionMs,
+        fx_ms: fxMs,
+        total_message_ms: totalMessageMs
+      });
+
       logExpenseDraftPerf({
         requestId,
         chatId,
-        msTotal: Date.now() - draftFlowStart,
+        msTotal: totalMessageMs,
         msParse: localParseMs,
         msUiRender: uiRenderMs,
-        msAnyBq: draftAnyBqMs
+        msAnyBq: draftAnyBqMs,
+        msFx: fxMs
       });
     } catch (error) {
       status = "error";
