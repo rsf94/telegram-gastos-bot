@@ -1,10 +1,10 @@
 import { getFxRate } from "../fx/index.js";
-import {
-  convertAmountToBaseCurrency,
-  FX_RATE_DIRECTION_QUOTE_PER_BASE,
-  normalizeCurrency
-} from "../fx/contract.js";
 import { hydrateFixedFxForDraft } from "./fx_fixed_jpy_mxn.js";
+
+function normalizeCurrency(code, fallback = "MXN") {
+  const value = String(code || fallback).trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(value) ? value : fallback;
+}
 
 function toFiniteNumber(value) {
   const n = Number(value);
@@ -24,6 +24,11 @@ function resolveOriginalAmount(draft) {
 export async function ensureDraftFx(draft, { fxClient = { getFxRate } } = {}) {
   if (!draft || typeof draft !== "object") return draft;
 
+  const hydratedFixed = hydrateFixedFxForDraft(draft);
+  if (hydratedFixed?.currency === "JPY" && hydratedFixed?.fx_provider === "fixed_trip") {
+    return hydratedFixed;
+  }
+
   const currency = normalizeCurrency(draft.currency || "MXN");
   const baseCurrency = normalizeCurrency(draft.base_currency || "MXN");
   const amount = resolveOriginalAmount(draft);
@@ -38,10 +43,7 @@ export async function ensureDraftFx(draft, { fxClient = { getFxRate } } = {}) {
       amount_base_currency: amount ?? draft.amount_base_currency ?? null,
       fx_required: false,
       fx_rate: null,
-      fx_provider: null,
-      fx_rate_direction: null,
-      fx_base_currency: null,
-      fx_quote_currency: null
+      fx_provider: null
     };
   }
 
@@ -63,18 +65,12 @@ export async function ensureDraftFx(draft, { fxClient = { getFxRate } } = {}) {
       amount_base_currency: amount,
       fx_required: false,
       fx_rate: null,
-      fx_provider: null,
-      fx_rate_direction: null,
-      fx_base_currency: null,
-      fx_quote_currency: null
+      fx_provider: null
     };
   }
 
   const existingAmountBase = toFiniteNumber(draft.amount_base_currency);
   const existingRate = toFiniteNumber(draft.fx_rate);
-  const fxDirection = draft.fx_rate_direction || FX_RATE_DIRECTION_QUOTE_PER_BASE;
-  const fxBaseCurrency = normalizeCurrency(draft.fx_base_currency || baseCurrency);
-  const fxQuoteCurrency = normalizeCurrency(draft.fx_quote_currency || currency);
   if (existingAmountBase != null && existingAmountBase > 0 && existingRate != null && existingRate > 0) {
     return {
       ...draft,
@@ -84,35 +80,22 @@ export async function ensureDraftFx(draft, { fxClient = { getFxRate } } = {}) {
       fx_required: true,
       amount_base_currency: existingAmountBase,
       fx_rate: existingRate,
-      fx_provider: draft.fx_provider || null,
-      fx_rate_direction: fxDirection,
-      fx_base_currency: fxBaseCurrency,
-      fx_quote_currency: fxQuoteCurrency
+      fx_provider: draft.fx_provider || null
     };
   }
 
   try {
     const fx = await fxClient.getFxRate({
       date: draft.purchase_date,
-      base: baseCurrency,
-      quote: currency
+      base: currency,
+      quote: baseCurrency
     });
     const rate = Number(fx?.rate);
     if (!Number.isFinite(rate) || rate <= 0) {
       throw new Error(`Invalid FX rate for ${currency}/${baseCurrency} on ${draft.purchase_date}`);
     }
 
-    const amountBaseCurrency = convertAmountToBaseCurrency({
-      amount,
-      amountCurrency: currency,
-      baseCurrency,
-      quoteCurrency: currency,
-      fxRate: rate,
-      fxRateDirection: FX_RATE_DIRECTION_QUOTE_PER_BASE
-    });
-    if (!Number.isFinite(amountBaseCurrency) || amountBaseCurrency <= 0) {
-      throw new Error(`Could not convert ${currency} to ${baseCurrency} using rate ${rate}`);
-    }
+    const amountBaseCurrency = Math.round((amount * rate + Number.EPSILON) * 100) / 100;
 
     return {
       ...draft,
@@ -122,20 +105,9 @@ export async function ensureDraftFx(draft, { fxClient = { getFxRate } } = {}) {
       fx_required: true,
       fx_rate: rate,
       fx_provider: fx?.provider || "unknown",
-      fx_rate_direction: FX_RATE_DIRECTION_QUOTE_PER_BASE,
-      fx_base_currency: baseCurrency,
-      fx_quote_currency: currency,
       amount_base_currency: amountBaseCurrency
     };
   } catch (_error) {
-    const fallbackDraft = hydrateFixedFxForDraft({
-      ...draft,
-      amount,
-      currency,
-      base_currency: baseCurrency
-    });
-    if (fallbackDraft?.fx_provider === "fixed_trip") return fallbackDraft;
-
     return {
       ...draft,
       amount,
@@ -144,9 +116,6 @@ export async function ensureDraftFx(draft, { fxClient = { getFxRate } } = {}) {
       fx_required: true,
       fx_rate: draft.fx_rate ?? null,
       fx_provider: draft.fx_provider ?? null,
-      fx_rate_direction: draft.fx_rate_direction ?? null,
-      fx_base_currency: draft.fx_base_currency ?? null,
-      fx_quote_currency: draft.fx_quote_currency ?? null,
       amount_base_currency: draft.amount_base_currency ?? null
     };
   }
