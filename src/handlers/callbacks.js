@@ -28,6 +28,7 @@ import {
 import { ALLOWED_PAYMENT_METHODS } from "../config.js";
 import { getActiveTripForChat } from "../usecases/resolve_active_trip.js";
 import { attachActiveTripToDraft } from "../usecases/attach_active_trip.js";
+import { ensureDraftFx } from "../usecases/ensure_draft_fx.js";
 import {
   buildAccountSelectKeyboard,
   buildConfirmKeyboard,
@@ -273,15 +274,16 @@ export function createCallbackHandler({
           type: "toggleTripInclude",
           include: data === "trip_include"
         }).draft;
+        const toggledWithFx = await ensureDraftFx(toggled);
 
-        setDraft(chatId, toggled);
+        setDraft(chatId, toggledWithFx);
         const messageId = cb.message?.message_id;
         if (messageId) {
-          await editMessage(chatId, messageId, preview(toggled), {
-            reply_markup: mainKeyboardFn(toggled)
+          await editMessage(chatId, messageId, preview(toggledWithFx), {
+            reply_markup: mainKeyboardFn(toggledWithFx)
           });
         } else {
-          await sendMessage(chatId, preview(toggled), { reply_markup: mainKeyboardFn(toggled) });
+          await sendMessage(chatId, preview(toggledWithFx), { reply_markup: mainKeyboardFn(toggledWithFx) });
         }
 
         await answerCallback(cb.id);
@@ -314,17 +316,18 @@ export function createCallbackHandler({
 
         const activeTrip = await resolveActiveTripForChatFn(chatId);
         const draftWithTrip = attachActiveTripToDraft(draft, activeTrip);
+        const draftWithFx = await ensureDraftFx(draftWithTrip);
 
         if (requestId) {
-          draftWithTrip.__perf = { ...draftWithTrip.__perf, request_id: requestId };
+          draftWithFx.__perf = { ...draftWithFx.__perf, request_id: requestId };
         }
 
-        const result = await saveExpenseFn({ chatId, draft: draftWithTrip });
+        const result = await saveExpenseFn({ chatId, draft: draftWithFx });
         if (result.ok) {
           setLastExpenseId(chatId, result.expenseId);
           clearDraft(chatId);
         } else {
-          setDraft(chatId, draftWithTrip);
+          setDraft(chatId, draftWithFx);
         }
 
         await answerCallback(cb.id);
@@ -348,7 +351,9 @@ export function createCallbackHandler({
         if (!draft) {
           await sendMessage(chatId, "No tengo borrador activo.");
         } else {
-          await sendMessage(chatId, preview(draft), { reply_markup: mainKeyboardFn(draft) });
+          const draftWithFx = await ensureDraftFx(draft);
+          setDraft(chatId, draftWithFx);
+          await sendMessage(chatId, preview(draftWithFx), { reply_markup: mainKeyboardFn(draftWithFx) });
         }
         await answerCallback(cb.id);
         return;
@@ -415,20 +420,21 @@ export function createCallbackHandler({
           });
         }
 
-        const err = validateDraft(selected);
+        const selectedWithFx = await ensureDraftFx(selected);
+        const err = validateDraft(selectedWithFx);
         if (err) {
           await sendMessage(chatId, err);
           await answerCallback(cb.id);
           return;
         }
 
-        setDraft(chatId, selected);
+        setDraft(chatId, selectedWithFx);
         if (messageId) {
-          await editMessage(chatId, messageId, preview(selected), {
-            reply_markup: mainKeyboardFn(selected)
+          await editMessage(chatId, messageId, preview(selectedWithFx), {
+            reply_markup: mainKeyboardFn(selectedWithFx)
           });
         } else {
-          await sendMessage(chatId, preview(selected), { reply_markup: mainKeyboardFn(selected) });
+          await sendMessage(chatId, preview(selectedWithFx), { reply_markup: mainKeyboardFn(selectedWithFx) });
         }
         await answerCallback(cb.id);
         return;

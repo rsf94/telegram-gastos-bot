@@ -34,11 +34,16 @@ export function renderFxBlock(draft) {
   const currency = String(draft?.currency || "").toUpperCase();
   const baseCurrency = String(draft?.base_currency || "").toUpperCase();
   const amountBaseCurrency = Number(draft?.amount_base_currency);
+  const amountOriginal = Number(draft?.amount);
   const fxRate = Number(draft?.fx_rate);
+  const fxProvider = String(draft?.fx_provider || "").trim();
 
   if (!currency || !baseCurrency || !Number.isFinite(amountBaseCurrency)) return [];
 
-  const lines = [`≈ ${baseCurrency} ${formatMoney(amountBaseCurrency)}`];
+  const conversionPrefix = Number.isFinite(amountOriginal) && amountOriginal > 0
+    ? `${formatMoney(amountOriginal)} ${currency} ≈ ${baseCurrency} ${formatMoney(amountBaseCurrency)}`
+    : `≈ ${baseCurrency} ${formatMoney(amountBaseCurrency)}`;
+  const lines = [conversionPrefix];
   const months = Number(draft?.msi_months);
 
   if (Number.isFinite(months) && months > 1) {
@@ -46,8 +51,15 @@ export function renderFxBlock(draft) {
     return lines;
   }
 
+  const meta = [];
   if (Number.isFinite(fxRate) && fxRate > 0) {
-    lines.push(`(1 ${currency} = ${formatMoney(fxRate, { maximumFractionDigits: 6 })} ${baseCurrency})`);
+    meta.push(`rate ${formatMoney(fxRate, { maximumFractionDigits: 6 })}`);
+  }
+  if (fxProvider) {
+    meta.push(`provider ${fxProvider}`);
+  }
+  if (meta.length > 0) {
+    lines.push(`(${meta.join(", ")})`);
   }
 
   return lines;

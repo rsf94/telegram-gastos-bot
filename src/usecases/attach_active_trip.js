@@ -21,12 +21,25 @@ export function attachActiveTripToDraft(draft, activeTrip) {
   const explicitlyExcludedTrip =
     previousTripId === null && previousActiveTripId && previousActiveTripId === activeTrip.tripId;
 
+  if (explicitlyExcludedTrip) {
+    next.base_currency = "MXN";
+    if (!next.currency_explicit) {
+      next.currency = "MXN";
+    }
+  }
+
   const shouldAssignTrip = !next.trip_id && !explicitlyExcludedTrip;
   if (shouldAssignTrip) {
     next.trip_id = String(activeTrip.tripId);
   }
 
   const shouldApplyTripCurrency = Boolean(next.trip_id) && !explicitlyExcludedTrip;
+  if (shouldApplyTripCurrency && activeTrip.baseCurrency) {
+    next.base_currency = String(activeTrip.baseCurrency).toUpperCase();
+  } else if (!next.base_currency) {
+    next.base_currency = "MXN";
+  }
+
   if (
     shouldApplyTripCurrency &&
     (!next.currency || next.currency === "MXN") &&
